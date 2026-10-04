@@ -49,7 +49,15 @@ export const config = {
     'VPSMURAH_WHATSAPP_SEND_URL',
     'https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages'
   ),
+  vpsmurahInboxUrl: optional(
+    'VPSMURAH_WHATSAPP_INBOX_URL',
+    'https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox'
+  ),
   vpsmurahWebhookSecret: process.env.VPSMURAH_WEBHOOK_SECRET || '',
+
+  // Polling
+  pollingEnabled: optionalBool('POLLING_ENABLED', true),
+  pollIntervalMs: Math.max(5000, optionalInt('POLL_INTERVAL_MS', 60000)),
 
   // Bot identity
   botWhatsappNumber: required('BOT_WHATSAPP_NUMBER'),

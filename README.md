@@ -44,6 +44,9 @@ cp .env.example .env
 |---|---|---|
 | `VPSMURAH_API_KEY` | ✅ | API key from VPSMurah dashboard |
 | `VPSMURAH_WHATSAPP_SEND_URL` | ❌ | Send endpoint (default: `https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages`) |
+| `VPSMURAH_WHATSAPP_INBOX_URL` | ❌ | Inbox polling endpoint (default: `https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox`) |
+| `POLLING_ENABLED` | ❌ | Enable background polling (default: `true`) |
+| `POLL_INTERVAL_MS` | ❌ | Polling interval in ms (default: `60000`, min: `5000`) |
 | `VPSMURAH_WEBHOOK_SECRET` | ❌ | Webhook signature secret (if available) |
 | `BOT_WHATSAPP_NUMBER` | ✅ | Bot's WhatsApp number (e.g., `628123456789`) |
 | `GEMINI_API_KEY` | ✅ | Google Gemini API key |
@@ -55,11 +58,27 @@ cp .env.example .env
 | `SYSTEM_PROMPT` | ❌ | Custom AI system prompt |
 | `PORT` | ❌ | Server port (default: `3000`) |
 
-### VPSMurah Outgoing API Specification
+> ⚠️ **Credit Consumption Notice**: VPSMurah charges 1 credit per API request (including each `GET /wa-api/inbox` poll). Setting `POLL_INTERVAL_MS` too low will deplete credits rapidly. The default is **60,000 ms (60 seconds)**, and intervals below 5,000 ms are automatically clamped.
 
-Production Endpoint:
+### VPSMurah Outgoing & Inbox API Specification
+
+**Inbox Polling (Incoming Messages):**
+```
+GET https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox
+Authorization: Bearer VPSMURAH_API_KEY
+Accept: application/json
+```
+
+**Send Message (Outgoing Replies):**
 ```
 POST https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages
+Authorization: Bearer VPSMURAH_API_KEY
+Content-Type: application/json
+
+{
+  "to": "6281234567890",
+  "text": "Halo dari API"
+}
 ```
 
 Headers:
@@ -108,24 +127,27 @@ npm start
 
 ```
 src/
-├── server.ts            # Express server entry point
-├── config.ts            # Centralized config from env vars
+├── server.ts                 # Express server entry point & poller lifecycle
+├── config.ts                 # Centralized config from env vars
 ├── routes/
-│   └── webhook.ts       # Webhook endpoint handler
+│   └── webhook.ts            # Webhook endpoint handler (manual/test)
 ├── providers/
-│   └── vpsmurah.ts      # VPSMurah payload adapter
+│   ├── vpsmurah.ts           # VPSMurah webhook payload adapter
+│   └── vpsmurahInbox.ts      # VPSMurah GET /wa-api/inbox adapter
 ├── services/
-│   ├── gemini.ts        # Gemini AI generation
-│   ├── whatsapp.ts      # WhatsApp message sending
-│   ├── mention.ts       # Mention detection & stripping
-│   ├── memory.ts        # Conversation memory
-│   ├── idempotency.ts   # Duplicate prevention
-│   └── rateLimit.ts     # Rate limiting
+│   ├── poller.ts             # Background poller for inbox messages
+│   ├── messageProcessor.ts   # Unified message filtering, dedup & AI dispatch
+│   ├── gemini.ts             # Gemini AI generation
+│   ├── whatsapp.ts           # WhatsApp message sending (POST /wa-api/messages)
+│   ├── mention.ts            # Mention detection & stripping
+│   ├── memory.ts             # Conversation memory
+│   ├── idempotency.ts        # Duplicate prevention (24h TTL)
+│   └── rateLimit.ts          # Rate limiting
 ├── types/
-│   └── whatsapp.ts      # TypeScript interfaces
+│   └── whatsapp.ts           # TypeScript interfaces
 └── utils/
-    ├── logger.ts        # Structured logging
-    └── phone.ts         # Phone number normalization
+    ├── logger.ts             # Structured logging with secret redaction
+    └── phone.ts              # Phone number normalization & recipient formatting
 ```
 
 ## Group Chat Behavior

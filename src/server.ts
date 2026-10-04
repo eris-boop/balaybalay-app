@@ -7,6 +7,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { config } from './config';
 import { webhookRouter } from './routes/webhook';
+import { startPoller, stopPoller } from './services/poller';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -30,6 +31,8 @@ app.use((req, _res, next) => {
 app.get('/health', (_req, res) => {
   res.status(200).json({
     status: 'ok',
+    polling: config.pollingEnabled,
+    pollIntervalMs: config.pollIntervalMs,
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   });
@@ -67,11 +70,17 @@ const server = app.listen(config.port, '0.0.0.0', () => {
   logger.server.info(`Model: ${config.geminiModel}`);
   logger.server.info(`Private chat responses: ${config.respondInPrivate ? 'enabled' : 'disabled'}`);
   logger.server.info(`Rate limit: ${config.rateLimitPerMinute}/min`);
+
+  // Start background inbox poller
+  if (config.pollingEnabled) {
+    startPoller();
+  }
 });
 
 // --- Graceful shutdown ---
 function shutdown(signal: string) {
   logger.server.info(`${signal} received, shutting down gracefully...`);
+  stopPoller();
   server.close(() => {
     logger.server.info('Server closed');
     process.exit(0);

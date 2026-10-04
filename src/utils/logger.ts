@@ -70,4 +70,5 @@ export const logger = {
   error: createLogger('ERROR'),
   server: createLogger('SERVER'),
   rateLimit: createLogger('RATE_LIMIT'),
+  polling: createLogger('POLLING'),
 };

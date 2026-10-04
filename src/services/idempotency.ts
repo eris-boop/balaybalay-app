@@ -4,10 +4,30 @@
  * Uses in-memory cache with TTL-based expiry.
  */
 
+import crypto from 'crypto';
 import { logger } from '../utils/logger';
 
-const TTL_MS = 10 * 60 * 1000; // 10 minutes
-const CLEANUP_INTERVAL_MS = 60 * 1000; // Clean up every 1 minute
+// Default TTL: 24 hours to prevent re-processing messages across polling cycles
+const TTL_MS = 24 * 60 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // Clean up every 5 minutes
+
+/**
+ * Generate a deterministic message key when provider does not supply a messageId:
+ * chatId + senderId + timestamp + hash(text)
+ */
+export function generateDeterministicKey(
+  chatId: string,
+  senderId: string,
+  timestamp?: number,
+  text?: string
+): string {
+  const textHash = crypto
+    .createHash('sha256')
+    .update(text || '')
+    .digest('hex')
+    .substring(0, 16);
+  return `${chatId}:${senderId}:${timestamp || 0}:${textHash}`;
+}
 
 class IdempotencyCache {
   private cache = new Map<string, number>();

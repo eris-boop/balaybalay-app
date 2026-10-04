@@ -63,6 +63,10 @@ PORT=3000
 
 VPSMURAH_API_KEY=<your_actual_api_key>
 VPSMURAH_WHATSAPP_SEND_URL=https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages
+VPSMURAH_WHATSAPP_INBOX_URL=https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox
+
+POLLING_ENABLED=true
+POLL_INTERVAL_MS=60000
 
 BOT_WHATSAPP_NUMBER=<your_bot_whatsapp_number>
 
@@ -75,10 +79,15 @@ MAX_HISTORY_MESSAGES=10
 RATE_LIMIT_PER_MINUTE=10
 ```
 
-> **VPSMurah Outgoing API Details:**
-> - Endpoint: `POST https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages`
+> ⚠️ **Penting Mengenai Kredit VPSMurah:**
+> Setiap request API ke VPSMurah (termasuk setiap polling `GET /wa-api/inbox`) memotong **1 kredit**.
+> Jangan menyetel `POLL_INTERVAL_MS` terlalu cepat agar kredit Anda tidak cepat habis. Default yang direkomendasikan adalah **60000** (60 detik). Poller secara otomatis mengunci interval minimal di **5000 ms**.
+
+> **VPSMurah API Details:**
+> - Polling Inbox: `GET https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox`
+> - Send Message: `POST https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages`
 > - Header: `Authorization: Bearer VPSMURAH_API_KEY`, `Content-Type: application/json`
-> - Request body:
+> - Request body outgoing:
 >   ```json
 >   {
 >     "to": "6281234567890",
@@ -107,6 +116,8 @@ Expected response:
 ```json
 {
   "status": "ok",
+  "polling": true,
+  "pollIntervalMs": 60000,
   "timestamp": "2026-10-04T12:00:00.000Z",
   "uptime": 42
 }
@@ -127,18 +138,13 @@ Expected:
 }
 ```
 
-## Step 8: Configure VPSMurah Webhook
+## Step 8: Inbox Polling Mechanism
 
-1. Log in to your VPSMurah dashboard
-2. Navigate to WhatsApp Unofficial API settings
-3. Set the **Webhook URL** to:
+Karena VPSMurah Unofficial API tidak menyediakan incoming webhook, bot secara otomatis menjalankan background poller (`GET /wa-api/inbox`) setiap `POLL_INTERVAL_MS`. 
 
-```
-https://wa.balaybalay.sbs/webhook
-```
+Pesan yang masuk dinormalisasi, dicek anti-duplikat (idempotency 24 jam), difilter (mention grup / DM pribadi), lalu dijawab otomatis menggunakan Gemini AI via `POST /wa-api/messages`.
 
-4. Save the settings
-5. The webhook is now active
+Endpoint `POST /webhook` tetap tersedia di `https://wa.balaybalay.sbs/webhook` untuk kebutuhan testing manual jika diperlukan.
 
 ## Step 9: Test the Bot
 
