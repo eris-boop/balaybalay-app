@@ -12,9 +12,12 @@ describe('WhatsApp Service - VPSMurah Integration', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    (config as { whatsappProvider: string }).whatsappProvider = 'vpsmurah';
+    (config as { vpsmurahApiKey: string }).vpsmurahApiKey = 'test-secret-vpsmurah-key';
   });
 
   afterEach(() => {
+    (config as { whatsappProvider: string }).whatsappProvider = 'baileys';
     globalThis.fetch = originalFetch;
   });
 

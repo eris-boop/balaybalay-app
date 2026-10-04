@@ -7,7 +7,8 @@
 
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { formatRecipient } from '../utils/phone';
+import { formatRecipient, toBaileysJid } from '../utils/phone';
+import { sendBaileysMessage } from './whatsappClient';
 
 interface SendResult {
   success: boolean;
@@ -15,13 +16,12 @@ interface SendResult {
 }
 
 /**
- * Send a text message to a WhatsApp recipient via VPSMurah API.
+ * Send a text message to a WhatsApp recipient using the active provider.
+ * Defaults to direct Baileys WebSocket, with optional VPSMurah fallback.
  */
 export async function sendMessage(chatId: string, text: string): Promise<SendResult> {
-  const recipient = formatRecipient(chatId);
-
-  if (!recipient || !text) {
-    logger.whatsapp.warn('sendMessage called with empty recipient or text');
+  if (!chatId || !text) {
+    logger.whatsapp.warn('sendMessage called with empty chatId or text');
     return { success: false, error: 'Missing recipient or text' };
   }
 
@@ -31,14 +31,21 @@ export async function sendMessage(chatId: string, text: string): Promise<SendRes
     ? text.substring(0, maxResponseChars) + '\n\n_(pesan terpotong karena terlalu panjang)_'
     : text;
 
-  // VPSMurah POST /wa-api/messages requires ONLY "to" and "text"
+  // Primary: Baileys direct WebSocket
+  if (config.whatsappProvider === 'baileys') {
+    const targetJid = toBaileysJid(chatId);
+    return sendBaileysMessage(targetJid, truncatedText);
+  }
+
+  // Fallback: VPSMurah HTTP API
+  const recipient = formatRecipient(chatId);
   const payload = {
     to: recipient,
     text: truncatedText,
   };
 
   const controller = new AbortController();
-  const timeoutMs = 25_000; // 25 seconds timeout (15-30s range)
+  const timeoutMs = 25_000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {

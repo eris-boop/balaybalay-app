@@ -52,7 +52,7 @@ export async function generateReply(params: GenerateReplyParams): Promise<string
   });
 
   try {
-    logger.gemini.info(`Generating reply for chat ${chatId.substring(0, 8)}... (${truncatedMessage.length} chars)`);
+    logger.gemini.info('Generating response');
 
     const response = await genai.models.generateContent({
       model: config.geminiModel,

@@ -23,6 +23,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 
+# Create persistent storage directory with proper permissions
+RUN mkdir -p /app/data/wa-auth && chown -R appuser:appgroup /app/data
+
 USER appuser
 
 EXPOSE 3000

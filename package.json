@@ -9,7 +9,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:gemini": "tsx scripts/test-gemini.ts"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -23,13 +24,17 @@
   "license": "MIT",
   "dependencies": {
     "@google/genai": "^1.0.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "dotenv": "^16.4.7",
     "express": "^4.21.1",
-    "helmet": "^8.0.0"
+    "helmet": "^8.0.0",
+    "pino": "^10.4.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

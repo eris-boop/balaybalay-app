@@ -25,16 +25,19 @@ import { rateLimiter } from './rateLimit';
 import { config } from '../config';
 import { phoneEquals } from '../utils/phone';
 import { logger } from '../utils/logger';
+import { getWhatsAppStatus } from './whatsappClient';
 
 export async function processIncomingMessage(message: IncomingMessage): Promise<boolean> {
+  const botIdentifier = getWhatsAppStatus().botJid || config.botWhatsappNumber;
+
   // Guard 1: ignore messages sent by the bot itself
   if (message.isFromMe) {
-    logger.polling.debug('Ignoring message from self (isFromMe=true)');
+    logger.whatsapp.debug('Ignoring message from self (isFromMe=true)');
     return false;
   }
 
-  if (message.senderId && phoneEquals(message.senderId, config.botWhatsappNumber)) {
-    logger.polling.debug('Ignoring message from bot WhatsApp number');
+  if (message.senderId && botIdentifier && phoneEquals(message.senderId, botIdentifier)) {
+    logger.whatsapp.debug('Ignoring message from bot WhatsApp number');
     return false;
   }
 
@@ -45,7 +48,7 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
     generateDeterministicKey(message.chatId, message.senderId, message.timestamp, message.text);
 
   if (idempotency.isDuplicate(dedupeKey)) {
-    logger.polling.debug(`Duplicate message ignored: ${dedupeKey}`);
+    logger.whatsapp.debug(`Duplicate message ignored: ${dedupeKey}`);
     return false;
   }
 
@@ -64,14 +67,14 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
   // Guard 5: chat type & mention policy
   if (message.isGroup) {
     // In group chat: bot MUST be mentioned
-    if (!isBotMentioned(message, config.botWhatsappNumber)) {
-      logger.polling.debug('Bot not mentioned in group message, ignoring without calling Gemini');
+    if (!botIdentifier || !isBotMentioned(message, botIdentifier)) {
+      logger.whatsapp.debug('Bot not mentioned in group message, ignoring without calling Gemini');
       return false;
     }
   } else {
     // In private chat: check if private responses are enabled
     if (!config.respondInPrivate) {
-      logger.polling.debug('Private chat responses disabled (RESPOND_IN_PRIVATE=false), ignoring');
+      logger.whatsapp.debug('Private chat responses disabled (RESPOND_IN_PRIVATE=false), ignoring');
       return false;
     }
   }
@@ -90,8 +93,8 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
 
   // Prepare prompt: strip bot mention from group messages
   let prompt = message.text;
-  if (message.isGroup) {
-    prompt = stripBotMention(prompt, config.botWhatsappNumber);
+  if (message.isGroup && botIdentifier) {
+    prompt = stripBotMention(prompt, botIdentifier);
   }
 
   // Truncate to max input chars
@@ -106,28 +109,41 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
   // Retrieve chat history
   const history = memory.getHistory(message.chatId);
 
-  // Generate AI reply via Gemini
-  const reply = await generateReply({
-    message: prompt,
-    senderName: message.senderName,
-    chatId: message.chatId,
-    history,
-  });
+  try {
+    // Generate AI reply via Gemini
+    const reply = await generateReply({
+      message: prompt,
+      senderName: message.senderName,
+      chatId: message.chatId,
+      history,
+    });
 
-  // Store user message & assistant reply in conversation memory
-  memory.addEntry(message.chatId, {
-    role: 'user',
-    content: prompt,
-    timestamp: Date.now(),
-  });
+    // Store user message & assistant reply in conversation memory
+    memory.addEntry(message.chatId, {
+      role: 'user',
+      content: prompt,
+      timestamp: Date.now(),
+    });
 
-  memory.addEntry(message.chatId, {
-    role: 'assistant',
-    content: reply,
-    timestamp: Date.now(),
-  });
+    memory.addEntry(message.chatId, {
+      role: 'assistant',
+      content: reply,
+      timestamp: Date.now(),
+    });
 
-  // Send reply back to WhatsApp
-  await sendMessage(message.chatId, reply);
-  return true;
+    // Send reply back to WhatsApp
+    await sendMessage(message.chatId, reply);
+    return true;
+  } catch (err) {
+    logger.error.error('Gemini processing failed, handled gracefully:', (err as Error).message);
+    try {
+      await sendMessage(
+        message.chatId,
+        'Maaf, saya sedang mengalami kendala teknis saat memproses pesan Anda. Silakan coba lagi sebentar ya.'
+      );
+    } catch {
+      // ignore secondary error
+    }
+    return false;
+  }
 }

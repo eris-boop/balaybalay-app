@@ -1,0 +1,118 @@
+/**
+ * Admin routes protected by ADMIN_TOKEN.
+ * Exposes secure QR pairing interface for WhatsApp Web login.
+ */
+
+import { Router, Request, Response } from 'express';
+import QRCode from 'qrcode';
+import { config } from '../config';
+import { getWhatsAppStatus, getLatestQr } from '../services/whatsappClient';
+
+export const adminRouter = Router();
+
+/**
+ * Middleware: Verify ADMIN_TOKEN.
+ * Accepts token via ?token= query parameter or x-admin-token header or Bearer token.
+ */
+function verifyAdminToken(req: Request, res: Response, next: () => void): void {
+  // If ADMIN_TOKEN is not set in config, deny all access for safety
+  if (!config.adminToken) {
+    res.status(403).json({
+      error: 'ADMIN_TOKEN is not configured on the server. Please set ADMIN_TOKEN in environment variables.',
+    });
+    return;
+  }
+
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const headerToken = req.headers['x-admin-token'] as string | undefined;
+  const authHeader = req.headers['authorization'];
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
+
+  const providedToken = queryToken || headerToken || bearerToken;
+
+  if (!providedToken || providedToken !== config.adminToken) {
+    res.status(403).json({ error: 'Forbidden: invalid or missing admin token' });
+    return;
+  }
+
+  next();
+}
+
+/**
+ * GET /admin/qr
+ * Displays WhatsApp QR code for pairing if not connected.
+ * Returns { connected: true } if already connected.
+ */
+adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => {
+  const status = getWhatsAppStatus();
+
+  // If already connected, return JSON response
+  if (status.connected) {
+    res.status(200).json({ connected: true });
+    return;
+  }
+
+  const qr = getLatestQr();
+
+  if (!qr) {
+    // QR code is not ready yet; send a simple auto-refreshing status page
+    const html = `<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="3">
+  <title>WhatsApp Pairing - Menghubungkan...</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0f172a; color: #f8fafc; text-align: center; }
+    .card { background: #1e293b; padding: 2rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 400px; }
+    .spinner { border: 4px solid rgba(255,255,255,0.1); width: 40px; height: 40px; border-radius: 50%; border-left-color: #22c55e; animation: spin 1s linear infinite; margin: 1.5rem auto; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Menghubungkan ke WhatsApp...</h2>
+    <div class="spinner"></div>
+    <p>Sedang mempersiapkan QR code pairing. Halaman akan me-refresh otomatis setiap 3 detik.</p>
+  </div>
+</body>
+</html>`;
+    res.status(200).type('html').send(html);
+    return;
+  }
+
+  try {
+    const qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 7 });
+
+    const html = `<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="20">
+  <title>WhatsApp Web QR Pairing</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0b141a; color: #e9edef; text-align: center; }
+    .card { background: #111b21; padding: 2.5rem; border-radius: 16px; border: 1px solid #222e35; max-width: 420px; box-shadow: 0 12px 30px rgba(0,0,0,0.6); }
+    h2 { margin-top: 0; color: #25d366; }
+    p { color: #8696a0; font-size: 0.95rem; line-height: 1.5; }
+    img { border-radius: 12px; background: white; padding: 12px; margin: 1rem 0; width: 280px; height: 280px; }
+    .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; background: rgba(37, 211, 102, 0.15); color: #25d366; font-size: 0.8rem; font-weight: 600; margin-bottom: 1rem; }
+    .footer { font-size: 0.8rem; color: #667781; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">WHATSAPP WEB PAIRING</div>
+    <h2>Scan QR Code</h2>
+    <p>Buka WhatsApp di HP Anda &gt; Pengaturan &gt; <strong>Perangkat Tertaut (Linked Devices)</strong> &gt; Tautkan Perangkat.</p>
+    <img src="${qrDataUrl}" alt="WhatsApp QR Code" />
+    <p class="footer">QR code diperbarui otomatis. Halaman me-refresh setiap 20 detik.</p>
+  </div>
+</body>
+</html>`;
+
+    res.status(200).type('html').send(html);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to generate QR image' });
+  }
+});

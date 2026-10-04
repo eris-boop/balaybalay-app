@@ -62,3 +62,21 @@ export function formatRecipient(chatId: string): string {
 
   return normalizePhone(trimmed);
 }
+
+/**
+ * Format chatId into a valid Baileys JID.
+ * Groups: ...@g.us
+ * Private: ...@s.whatsapp.net
+ */
+export function toBaileysJid(chatId: string): string {
+  if (!chatId) return '';
+  const trimmed = chatId.trim();
+  if (isGroupChat(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.endsWith('@s.whatsapp.net')) {
+    return trimmed;
+  }
+  const digits = normalizePhone(trimmed);
+  return digits ? `${digits}@s.whatsapp.net` : '';
+}

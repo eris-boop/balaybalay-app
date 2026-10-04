@@ -5,12 +5,15 @@
 
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ override: true });
 
-function required(key: string): string {
+import path from 'path';
+
+function required(key: string, hint?: string): string {
   const value = process.env[key];
   if (!value) {
-    console.error(`[CONFIG] Missing required environment variable: ${key}`);
+    const hintMsg = hint ? ` (${hint})` : '';
+    console.error(`[CONFIG] Missing required environment variable: ${key}${hintMsg}`);
     process.exit(1);
   }
   return value;
@@ -38,13 +41,37 @@ Jawab dengan bahasa yang sama dengan pengguna kecuali pengguna meminta bahasa la
 Jangan mengatakan bahwa kamu memiliki akses ke data atau fitur yang sebenarnya tidak tersedia.
 Gunakan formatting WhatsApp yang sederhana.`;
 
+const defaultAuthDir = process.env.WHATSAPP_AUTH_DIR ||
+  (process.platform === 'win32'
+    ? path.resolve(process.cwd(), 'data/wa-auth')
+    : '/app/data/wa-auth');
+
 export const config = {
   port: optionalInt('PORT', 3000),
   nodeEnv: optional('NODE_ENV', 'development'),
   isProduction: optional('NODE_ENV', 'development') === 'production',
 
-  // VPSMurah
-  vpsmurahApiKey: required('VPSMURAH_API_KEY'),
+  // WhatsApp Provider & Baileys Settings
+  whatsappProvider: optional('WHATSAPP_PROVIDER', 'baileys').toLowerCase(),
+  whatsappAuthDir: defaultAuthDir,
+  adminToken: optional('ADMIN_TOKEN', ''),
+
+  // Bot Identity (optional when using Baileys because JID is fetched from socket user)
+  botWhatsappNumber: optional('BOT_WHATSAPP_NUMBER', ''),
+
+  // Google Gemini AI (Required: from Google AI Studio)
+  geminiApiKey: required('GEMINI_API_KEY', 'Must be obtained from Google AI Studio'),
+  geminiModel: optional('GEMINI_MODEL', 'gemini-3.7-flash'),
+  systemPrompt: optional('SYSTEM_PROMPT', '') || DEFAULT_SYSTEM_PROMPT,
+
+  // Behavior
+  respondInPrivate: optionalBool('RESPOND_IN_PRIVATE', true),
+  maxInputChars: optionalInt('MAX_INPUT_CHARS', 8000),
+  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 10),
+  rateLimitPerMinute: optionalInt('RATE_LIMIT_PER_MINUTE', 10),
+
+  // Legacy VPSMurah (optional fallback)
+  vpsmurahApiKey: optional('VPSMURAH_API_KEY', ''),
   vpsmurahSendUrl: optional(
     'VPSMURAH_WHATSAPP_SEND_URL',
     'https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages'
@@ -54,22 +81,4 @@ export const config = {
     'https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox'
   ),
   vpsmurahWebhookSecret: process.env.VPSMURAH_WEBHOOK_SECRET || '',
-
-  // Polling
-  pollingEnabled: optionalBool('POLLING_ENABLED', true),
-  pollIntervalMs: Math.max(5000, optionalInt('POLL_INTERVAL_MS', 60000)),
-
-  // Bot identity
-  botWhatsappNumber: required('BOT_WHATSAPP_NUMBER'),
-
-  // Gemini
-  geminiApiKey: required('GEMINI_API_KEY'),
-  geminiModel: optional('GEMINI_MODEL', 'gemini-2.0-flash'),
-  systemPrompt: optional('SYSTEM_PROMPT', '') || DEFAULT_SYSTEM_PROMPT,
-
-  // Behavior
-  respondInPrivate: optionalBool('RESPOND_IN_PRIVATE', true),
-  maxInputChars: optionalInt('MAX_INPUT_CHARS', 8000),
-  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 10),
-  rateLimitPerMinute: optionalInt('RATE_LIMIT_PER_MINUTE', 10),
 } as const;

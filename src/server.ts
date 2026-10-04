@@ -7,7 +7,12 @@ import express from 'express';
 import helmet from 'helmet';
 import { config } from './config';
 import { webhookRouter } from './routes/webhook';
-import { startPoller, stopPoller } from './services/poller';
+import { adminRouter } from './routes/admin';
+import {
+  initWhatsAppClient,
+  disconnectWhatsApp,
+  getWhatsAppStatus,
+} from './services/whatsappClient';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -29,11 +34,12 @@ app.use((req, _res, next) => {
 
 // --- Health check endpoint ---
 app.get('/health', (_req, res) => {
+  const wsStatus = getWhatsAppStatus();
   res.status(200).json({
     status: 'ok',
-    polling: config.pollingEnabled,
-    pollIntervalMs: config.pollIntervalMs,
-    timestamp: new Date().toISOString(),
+    whatsappProvider: wsStatus.provider,
+    whatsappConnected: wsStatus.connected,
+    pairingRequired: wsStatus.pairingRequired,
     uptime: process.uptime(),
   });
 });
@@ -46,7 +52,10 @@ app.get('/', (_req, res) => {
   });
 });
 
-// --- Webhook routes ---
+// --- Admin routes (QR login) ---
+app.use('/admin', adminRouter);
+
+// --- Webhook routes (legacy/fallback if needed) ---
 app.use('/webhook', webhookRouter);
 
 // --- 404 handler ---
@@ -67,20 +76,23 @@ const server = app.listen(config.port, '0.0.0.0', () => {
   logger.server.info(`BalayBalay WhatsApp AI Bot started`);
   logger.server.info(`Listening on 0.0.0.0:${config.port}`);
   logger.server.info(`Environment: ${config.nodeEnv}`);
+  logger.server.info(`WhatsApp Provider: ${config.whatsappProvider}`);
   logger.server.info(`Model: ${config.geminiModel}`);
   logger.server.info(`Private chat responses: ${config.respondInPrivate ? 'enabled' : 'disabled'}`);
   logger.server.info(`Rate limit: ${config.rateLimitPerMinute}/min`);
 
-  // Start background inbox poller
-  if (config.pollingEnabled) {
-    startPoller();
+  // Initialize Baileys client if configured
+  if (config.whatsappProvider === 'baileys') {
+    initWhatsAppClient().catch((err) => {
+      logger.error.error('Failed to initialize Baileys WhatsApp client:', (err as Error).message);
+    });
   }
 });
 
 // --- Graceful shutdown ---
 function shutdown(signal: string) {
   logger.server.info(`${signal} received, shutting down gracefully...`);
-  stopPoller();
+  disconnectWhatsApp();
   server.close(() => {
     logger.server.info('Server closed');
     process.exit(0);

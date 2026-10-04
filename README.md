@@ -1,30 +1,62 @@
 # BalayBalay WhatsApp AI Bot
 
-Production-ready WhatsApp AI Bot powered by Google Gemini, using VPSMurah WhatsApp Unofficial API.
+Production-ready WhatsApp AI Bot powered by Google Gemini and direct WhatsApp Web connection via **Baileys WebSocket** (`@whiskeysockets/baileys`).
+
+---
+
+## Architecture Overview
+
+```
+WhatsApp
+   ↓
+Baileys WebSocket
+   ↓
+Incoming message handler (messages.upsert)
+   ↓
+Idempotency (anti-duplicate)
+   ↓
+Private / group mention filtering
+   ↓
+Google Gemini AI (gemini-3.7-flash)
+   ↓
+Baileys sendMessage()
+   ↓
+WhatsApp
+```
+
+> ⚠️ **Catatan Penting VPSMurah:**
+> Polling `GET /wa-api/inbox` dari VPSMurah telah **DIHAPUS & DINONAKTIFKAN SECARA PERMANEN** karena endpoint tersebut mengembalikan HTTP 501 dan menguras kredit. Seluruh pesan masuk dan keluar kini ditangani langsung oleh Baileys WebSocket tanpa polling dan tanpa biaya kredit API.
+
+---
 
 ## Features
 
-- 🤖 AI-powered responses via Google Gemini
-- 👥 Group chat support — bot responds only when mentioned
-- 💬 Private chat support — configurable
-- 🧠 Conversation memory per chat
-- 🔒 Security: helmet, payload validation, no secret logging
-- 🛡️ Anti-loop: idempotency cache, self-message detection
-- ⏱️ Rate limiting per sender
-- 📦 Production-ready: Docker, Coolify-compatible, health checks
+- ⚡ **Direct WhatsApp Connection**: Real-time message reception via Baileys WebSocket (no polling delay, no credit consumption)
+- 🤖 **Google Gemini AI**: Latest official `@google/genai` SDK with `gemini-3.7-flash`
+- 🔐 **Secure QR Pairing**: Token-protected admin interface (`/admin/qr?token=ADMIN_TOKEN`)
+- 💾 **Persistent Auth Session**: Multi-file auth stored in `/app/data/wa-auth` (re-scan tidak diperlukan saat redeploy)
+- 👥 **Group Mention Logic**: Bot hanya merespons saat akun bot di-mention langsung di grup; mention otomatis dibersihkan sebelum dikirim ke AI
+- 💬 **Private Chat Support**: Percakapan 1-on-1 langsung dibalas tanpa perlu mention (dapat dinonaktifkan via `RESPOND_IN_PRIVATE=false`)
+- 🧠 **Conversation Memory**: Riwayat obrolan tersimpan per chat
+- 🛡️ **Anti-Loop & Idempotency**: Pesan dari bot sendiri diabaikan, cache idempotency 24 jam mencegah duplikasi
+- ⏱️ **Rate Limiting**: Perlindungan terhadap spam per pengirim
+- 🔒 **Security Best Practices**: Helmet headers, input truncation, secret redaction, validasi startup
 
-## Quick Start
+---
 
-### Prerequisites
+## Prerequisites
 
-- Node.js 22+
-- VPSMurah WhatsApp Unofficial API account
-- Google Gemini API key
+- **Node.js 22+**
+- **Google Gemini API Key** (dari [Google AI Studio](https://aistudio.google.com/))
+- **WhatsApp Account** (nomor HP aktif untuk bot)
+- **Coolify / Docker VPS** dengan Persistent Storage mount pada `/app/data`
 
-### Setup
+---
+
+## Quick Start (Local Development)
 
 ```bash
-# Clone the repository
+# Clone repository
 git clone <your-repo-url>
 cd balaybalay-whatsapp-bot
 
@@ -34,148 +66,100 @@ npm install
 # Copy environment template
 cp .env.example .env
 
-# Edit .env with your actual values
-# IMPORTANT: Never commit .env to git!
+# Edit .env dengan credentials Anda
+# (Pastikan GEMINI_API_KEY dan ADMIN_TOKEN terisi)
+
+# Test konektivitas Gemini AI
+npm run test:gemini
+
+# Jalankan development server
+npm run dev
 ```
 
-### Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `VPSMURAH_API_KEY` | ✅ | API key from VPSMurah dashboard |
-| `VPSMURAH_WHATSAPP_SEND_URL` | ❌ | Send endpoint (default: `https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages`) |
-| `VPSMURAH_WHATSAPP_INBOX_URL` | ❌ | Inbox polling endpoint (default: `https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox`) |
-| `POLLING_ENABLED` | ❌ | Enable background polling (default: `true`) |
-| `POLL_INTERVAL_MS` | ❌ | Polling interval in ms (default: `60000`, min: `5000`) |
-| `VPSMURAH_WEBHOOK_SECRET` | ❌ | Webhook signature secret (if available) |
-| `BOT_WHATSAPP_NUMBER` | ✅ | Bot's WhatsApp number (e.g., `628123456789`) |
-| `GEMINI_API_KEY` | ✅ | Google Gemini API key |
-| `GEMINI_MODEL` | ❌ | Gemini model (default: `gemini-2.0-flash`) |
-| `RESPOND_IN_PRIVATE` | ❌ | Reply to DMs (default: `true`) |
-| `MAX_INPUT_CHARS` | ❌ | Max input chars (default: `8000`) |
-| `MAX_HISTORY_MESSAGES` | ❌ | History depth (default: `10`) |
-| `RATE_LIMIT_PER_MINUTE` | ❌ | Max requests/min/sender (default: `10`) |
-| `SYSTEM_PROMPT` | ❌ | Custom AI system prompt |
-| `PORT` | ❌ | Server port (default: `3000`) |
-
-> ⚠️ **Credit Consumption Notice**: VPSMurah charges 1 credit per API request (including each `GET /wa-api/inbox` poll). Setting `POLL_INTERVAL_MS` too low will deplete credits rapidly. The default is **60,000 ms (60 seconds)**, and intervals below 5,000 ms are automatically clamped.
-
-### VPSMurah Outgoing & Inbox API Specification
-
-**Inbox Polling (Incoming Messages):**
+Buka browser dan akses halaman pairing QR:
 ```
-GET https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox
-Authorization: Bearer VPSMURAH_API_KEY
-Accept: application/json
+http://localhost:3000/admin/qr?token=YOUR_ADMIN_TOKEN
 ```
+Buka WhatsApp di ponsel > **Perangkat Tertaut (Linked Devices)** > **Tautkan Perangkat**, lalu scan QR code yang tampil.
 
-**Send Message (Outgoing Replies):**
-```
-POST https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages
-Authorization: Bearer VPSMURAH_API_KEY
-Content-Type: application/json
+---
 
-{
-  "to": "6281234567890",
-  "text": "Halo dari API"
-}
-```
+## Environment Variables
 
-Headers:
-```
-Authorization: Bearer VPSMURAH_API_KEY
-Content-Type: application/json
-```
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PORT` | ❌ | `3000` | Port HTTP server |
+| `NODE_ENV` | ❌ | `development` | Environment (`development` / `production`) |
+| `WHATSAPP_PROVIDER` | ❌ | `baileys` | Provider WhatsApp (`baileys`) |
+| `WHATSAPP_AUTH_DIR` | ❌ | `/app/data/wa-auth` | Path direktori penyimpanan session auth |
+| `ADMIN_TOKEN` | ✅ | - | Token rahasia untuk mengakses route QR login |
+| `GEMINI_API_KEY` | ✅ | - | API Key dari Google AI Studio (wajib) |
+| `GEMINI_MODEL` | ❌ | `gemini-3.7-flash` | Model Gemini yang digunakan |
+| `RESPOND_IN_PRIVATE` | ❌ | `true` | Balas pesan di private chat |
+| `MAX_INPUT_CHARS` | ❌ | `8000` | Maksimum karakter pesan input |
+| `MAX_HISTORY_MESSAGES`| ❌ | `10` | Jumlah percakapan tersimpan dalam memori |
+| `RATE_LIMIT_PER_MINUTE`| ❌ | `10` | Batas maksimum pesan per menit per user |
+| `SYSTEM_PROMPT` | ❌ | (default) | Instruksi kustom kepribadian bot |
 
-Request Body:
+---
+
+## HTTP Endpoints
+
+| Method | Path | Auth | Deskripsi |
+|---|---|---|---|
+| `GET` | `/` | Publik | Status aplikasi |
+| `GET` | `/health` | Publik | Status koneksi WhatsApp & uptime |
+| `GET` | `/admin/qr?token=...` | `ADMIN_TOKEN` | Halaman scan QR code pairing |
+| `POST`| `/webhook` | - | Endpoint webhook legacy (opsional/manual) |
+
+### Format Response `/health`
 ```json
 {
-  "to": "6281234567890",
-  "text": "Halo dari API"
+  "status": "ok",
+  "whatsappProvider": "baileys",
+  "whatsappConnected": true,
+  "pairingRequired": false,
+  "uptime": 123.45
 }
 ```
 
-### Development
+---
+
+## Scripts
 
 ```bash
-# Start dev server with hot reload
-npm run dev
-
-# Type checking
+# Type check TypeScript
 npm run typecheck
 
-# Run tests
+# Menjalankan unit tests
 npm test
 
-# Build for production
+# Mengetes koneksi Google Gemini API secara manual
+npm run test:gemini
+
+# Build bundle produksi
 npm run build
 
-# Start production server
+# Menjalankan server produksi
 npm start
 ```
 
-### API Endpoints
+---
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/` | Bot info and status |
-| `GET` | `/health` | Health check |
-| `POST` | `/webhook` | WhatsApp webhook receiver |
-| `GET` | `/webhook` | Webhook verification |
+## Coolify Persistent Storage Setup
 
-## Architecture
+Agar sesi login WhatsApp tidak hilang setiap kali aplikasi di-deploy ulang, Coolify **WAJIB** dikonfigurasi dengan Persistent Storage:
 
-```
-src/
-├── server.ts                 # Express server entry point & poller lifecycle
-├── config.ts                 # Centralized config from env vars
-├── routes/
-│   └── webhook.ts            # Webhook endpoint handler (manual/test)
-├── providers/
-│   ├── vpsmurah.ts           # VPSMurah webhook payload adapter
-│   └── vpsmurahInbox.ts      # VPSMurah GET /wa-api/inbox adapter
-├── services/
-│   ├── poller.ts             # Background poller for inbox messages
-│   ├── messageProcessor.ts   # Unified message filtering, dedup & AI dispatch
-│   ├── gemini.ts             # Gemini AI generation
-│   ├── whatsapp.ts           # WhatsApp message sending (POST /wa-api/messages)
-│   ├── mention.ts            # Mention detection & stripping
-│   ├── memory.ts             # Conversation memory
-│   ├── idempotency.ts        # Duplicate prevention (24h TTL)
-│   └── rateLimit.ts          # Rate limiting
-├── types/
-│   └── whatsapp.ts           # TypeScript interfaces
-└── utils/
-    ├── logger.ts             # Structured logging with secret redaction
-    └── phone.ts              # Phone number normalization & recipient formatting
-```
+1. Buka resource aplikasi di **Coolify**.
+2. Masuk ke tab **Storages**.
+3. Tambahkan storage baru:
+   - **Volume Name**: `wa-data`
+   - **Destination Path (Container)**: `/app/data`
+4. Klik **Save** dan **Redeploy**.
 
-## Group Chat Behavior
+Detail lengkap panduan Coolify tersedia di [README-COOLIFY.md](./README-COOLIFY.md).
 
-1. Bot **only responds** when its number is @mentioned in a group
-2. Mention is stripped from the text before sending to Gemini
-3. Reply goes to the **group chat**, not the individual sender
-4. If no mention → ignored with HTTP 200 (no Gemini API cost)
-
-## Security
-
-- Helmet middleware for HTTP headers
-- JSON body size limited to 1MB
-- No secrets/API keys in logs
-- Environment validation at startup
-- Request timeouts on external API calls
-- Rate limiting per sender
-- No stack traces exposed in production
-
-## Webhook Payload
-
-This bot uses an adapter pattern (`src/providers/vpsmurah.ts`) to normalize
-incoming webhook payloads. If VPSMurah changes their payload format, only
-the adapter needs to be updated.
-
-> **Note**: VPSMurah's WhatsApp Unofficial API does not currently document
-> a webhook signature/secret verification mechanism. The `VPSMURAH_WEBHOOK_SECRET`
-> env var is reserved for future use when/if the provider adds this feature.
+---
 
 ## License
 
