@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { isBotMentioned, stripBotMention } from '../src/services/mention';
+import { formatRecipient } from '../src/utils/phone';
 import { IncomingMessage } from '../src/types/whatsapp';
 
 const BOT_NUMBER = '628123456789';
@@ -106,5 +107,27 @@ describe('stripBotMention', () => {
   it('handles multiple mentions', () => {
     const result = stripBotMention('@628123456789 halo @628123456789', BOT_NUMBER);
     expect(result.trim()).toBe('halo');
+  });
+});
+
+describe('formatRecipient', () => {
+  it('normalizes Indonesian number with leading plus, spaces, dashes', () => {
+    expect(formatRecipient('+62 812-3456-7890')).toBe('6281234567890');
+  });
+
+  it('normalizes number with @s.whatsapp.net', () => {
+    expect(formatRecipient('6281234567890@s.whatsapp.net')).toBe('6281234567890');
+  });
+
+  it('normalizes number with @c.us', () => {
+    expect(formatRecipient('6281234567890@c.us')).toBe('6281234567890');
+  });
+
+  it('preserves group ID with @g.us suffix without stripping non-digits', () => {
+    expect(formatRecipient('120363001234567890@g.us')).toBe('120363001234567890@g.us');
+  });
+
+  it('returns empty string when given empty input', () => {
+    expect(formatRecipient('')).toBe('');
   });
 });

@@ -45,3 +45,20 @@ export function phoneEquals(a: string, b: string): boolean {
 export function isGroupChat(chatId: string): boolean {
   return chatId.includes('@g.us');
 }
+
+/**
+ * Format recipient destination for sending WhatsApp messages.
+ * - Group chats (e.g. 120363001234567890@g.us): preserve group ID without alteration.
+ * - Private chats: normalize into pure digits (e.g. 6281234567890), removing +,
+ *   spaces, dashes, parentheses, @s.whatsapp.net, and @c.us.
+ */
+export function formatRecipient(chatId: string): string {
+  if (!chatId) return '';
+  const trimmed = chatId.trim();
+
+  if (isGroupChat(trimmed)) {
+    return trimmed;
+  }
+
+  return normalizePhone(trimmed);
+}

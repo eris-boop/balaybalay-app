@@ -1,10 +1,13 @@
 /**
  * WhatsApp message sending service.
  * Sends messages via VPSMurah Unofficial API.
+ * Endpoint: POST /wa-api/messages
+ * Payload: { "to": "...", "text": "..." }
  */
 
 import { config } from '../config';
 import { logger } from '../utils/logger';
+import { formatRecipient } from '../utils/phone';
 
 interface SendResult {
   success: boolean;
@@ -12,12 +15,14 @@ interface SendResult {
 }
 
 /**
- * Send a text message to a WhatsApp chat via VPSMurah API.
+ * Send a text message to a WhatsApp recipient via VPSMurah API.
  */
 export async function sendMessage(chatId: string, text: string): Promise<SendResult> {
-  if (!chatId || !text) {
-    logger.whatsapp.warn('sendMessage called with empty chatId or text');
-    return { success: false, error: 'Missing chatId or text' };
+  const recipient = formatRecipient(chatId);
+
+  if (!recipient || !text) {
+    logger.whatsapp.warn('sendMessage called with empty recipient or text');
+    return { success: false, error: 'Missing recipient or text' };
   }
 
   // Truncate overly long responses
@@ -26,16 +31,18 @@ export async function sendMessage(chatId: string, text: string): Promise<SendRes
     ? text.substring(0, maxResponseChars) + '\n\n_(pesan terpotong karena terlalu panjang)_'
     : text;
 
+  // VPSMurah POST /wa-api/messages requires ONLY "to" and "text"
   const payload = {
-    id: chatId,
-    message: truncatedText,
+    to: recipient,
+    text: truncatedText,
   };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeoutMs = 25_000; // 25 seconds timeout (15-30s range)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    logger.whatsapp.info(`Sending message to ${chatId.substring(0, 8)}...`);
+    logger.whatsapp.info(`Sending message to ${recipient.substring(0, 8)}...`);
 
     const response = await fetch(config.vpsmurahSendUrl, {
       method: 'POST',
@@ -48,20 +55,44 @@ export async function sendMessage(chatId: string, text: string): Promise<SendRes
     });
 
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => 'no body');
-      logger.whatsapp.error(`VPSMurah API error: ${response.status} - ${errorBody}`);
-      return { success: false, error: `API returned ${response.status}` };
+      const status = response.status;
+      logger.whatsapp.error(`Send failed: status=${status}`);
+
+      let errorMessage: string;
+      if (status === 400) {
+        errorMessage = `Bad request: status=400 (invalid payload or recipient format)`;
+      } else if (status === 401) {
+        errorMessage = `Unauthorized: status=401 (invalid or missing API key)`;
+      } else if (status === 403) {
+        errorMessage = `Forbidden: status=403 (access denied)`;
+      } else if (status === 404) {
+        errorMessage = `Not found: status=404 (invalid API endpoint)`;
+      } else if (status === 429) {
+        errorMessage = `Rate limit: status=429 (provider rate limit reached)`;
+      } else if (status >= 500) {
+        errorMessage = `Provider error: status=${status}`;
+      } else {
+        errorMessage = `Send failed: status=${status}`;
+      }
+
+      return { success: false, error: errorMessage };
     }
 
-    logger.whatsapp.info(`Message sent successfully to ${chatId.substring(0, 8)}...`);
+    logger.whatsapp.info(`Message sent successfully to ${recipient.substring(0, 8)}...`);
     return { success: true };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      logger.whatsapp.error('VPSMurah API request timed out');
+      logger.whatsapp.error('Send failed: request timed out');
       return { success: false, error: 'Request timed out' };
     }
-    logger.whatsapp.error('Failed to send message:', (err as Error).message);
-    return { success: false, error: (err as Error).message };
+
+    const rawError = (err as Error).message || 'Unknown network error';
+    const sanitizedError = config.vpsmurahApiKey
+      ? rawError.replaceAll(config.vpsmurahApiKey, '[REDACTED]')
+      : rawError;
+
+    logger.whatsapp.error(`Send failed: ${sanitizedError}`);
+    return { success: false, error: sanitizedError };
   } finally {
     clearTimeout(timeout);
   }

@@ -47,7 +47,7 @@ export const config = {
   vpsmurahApiKey: required('VPSMURAH_API_KEY'),
   vpsmurahSendUrl: optional(
     'VPSMURAH_WHATSAPP_SEND_URL',
-    'https://my.vpsmurah.co.id/api/service/whatsapp-unofficial/send'
+    'https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages'
   ),
   vpsmurahWebhookSecret: process.env.VPSMURAH_WEBHOOK_SECRET || '',
 

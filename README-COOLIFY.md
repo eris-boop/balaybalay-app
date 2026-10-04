@@ -62,7 +62,7 @@ NODE_ENV=production
 PORT=3000
 
 VPSMURAH_API_KEY=<your_actual_api_key>
-VPSMURAH_WHATSAPP_SEND_URL=https://my.vpsmurah.co.id/api/service/whatsapp-unofficial/send
+VPSMURAH_WHATSAPP_SEND_URL=https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages
 
 BOT_WHATSAPP_NUMBER=<your_bot_whatsapp_number>
 
@@ -74,6 +74,17 @@ MAX_INPUT_CHARS=8000
 MAX_HISTORY_MESSAGES=10
 RATE_LIMIT_PER_MINUTE=10
 ```
+
+> **VPSMurah Outgoing API Details:**
+> - Endpoint: `POST https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages`
+> - Header: `Authorization: Bearer VPSMURAH_API_KEY`, `Content-Type: application/json`
+> - Request body:
+>   ```json
+>   {
+>     "to": "6281234567890",
+>     "text": "Halo dari API"
+>   }
+>   ```
 
 ⚠️ **IMPORTANT**: Enter actual secret values ONLY in Coolify's environment variables panel. Never commit them to git.
 

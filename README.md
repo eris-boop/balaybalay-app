@@ -43,7 +43,7 @@ cp .env.example .env
 | Variable | Required | Description |
 |---|---|---|
 | `VPSMURAH_API_KEY` | ✅ | API key from VPSMurah dashboard |
-| `VPSMURAH_WHATSAPP_SEND_URL` | ❌ | Send endpoint (has default) |
+| `VPSMURAH_WHATSAPP_SEND_URL` | ❌ | Send endpoint (default: `https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages`) |
 | `VPSMURAH_WEBHOOK_SECRET` | ❌ | Webhook signature secret (if available) |
 | `BOT_WHATSAPP_NUMBER` | ✅ | Bot's WhatsApp number (e.g., `628123456789`) |
 | `GEMINI_API_KEY` | ✅ | Google Gemini API key |
@@ -54,6 +54,27 @@ cp .env.example .env
 | `RATE_LIMIT_PER_MINUTE` | ❌ | Max requests/min/sender (default: `10`) |
 | `SYSTEM_PROMPT` | ❌ | Custom AI system prompt |
 | `PORT` | ❌ | Server port (default: `3000`) |
+
+### VPSMurah Outgoing API Specification
+
+Production Endpoint:
+```
+POST https://my.vpsmurah.co.id/api/svc/v1/wa-api/messages
+```
+
+Headers:
+```
+Authorization: Bearer VPSMURAH_API_KEY
+Content-Type: application/json
+```
+
+Request Body:
+```json
+{
+  "to": "6281234567890",
+  "text": "Halo dari API"
+}
+```
 
 ### Development
 
