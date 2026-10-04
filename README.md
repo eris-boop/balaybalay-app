@@ -94,11 +94,11 @@ Buka WhatsApp di ponsel > **Perangkat Tertaut (Linked Devices)** > **Tautkan Per
 | `WHATSAPP_AUTH_DIR` | ❌ | `/app/data/wa-auth` | Path direktori penyimpanan session auth |
 | `ADMIN_TOKEN` | ✅ | - | Token rahasia untuk mengakses route QR login |
 | `GEMINI_API_KEY` | ✅ | - | API Key dari Google AI Studio (wajib) |
-| `GEMINI_MODEL` | ❌ | `gemini-3.7-flash` | Model Gemini yang digunakan |
+| `GEMINI_MODEL` | ❌ | `gemini-3.7-flash` | Model Gemini utama yang digunakan |
+| `GEMINI_FALLBACK_MODEL`| ❌ | - | Model Gemini cadangan (opsional saat 429/503) |
 | `RESPOND_IN_PRIVATE` | ❌ | `true` | Balas pesan di private chat |
 | `MAX_INPUT_CHARS` | ❌ | `8000` | Maksimum karakter pesan input |
 | `MAX_HISTORY_MESSAGES`| ❌ | `10` | Jumlah percakapan tersimpan dalam memori |
-| `RATE_LIMIT_PER_MINUTE`| ❌ | `10` | Batas maksimum pesan per menit per user |
 | `SYSTEM_PROMPT` | ❌ | (default) | Instruksi kustom kepribadian bot |
 
 ---

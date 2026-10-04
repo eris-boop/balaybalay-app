@@ -81,7 +81,6 @@ const server = app.listen(config.port, '0.0.0.0', () => {
   logger.server.info(`WhatsApp Provider: ${config.whatsappProvider}`);
   logger.server.info(`Model: ${config.geminiModel}`);
   logger.server.info(`Private chat responses: ${config.respondInPrivate ? 'enabled' : 'disabled'}`);
-  logger.server.info(`Rate limit: ${config.rateLimitPerMinute}/min`);
 
   // Initialize Baileys client if configured
   if (config.whatsappProvider === 'baileys') {

@@ -62,13 +62,13 @@ export const config = {
   // Google Gemini AI (Required: from Google AI Studio)
   geminiApiKey: required('GEMINI_API_KEY', 'Must be obtained from Google AI Studio'),
   geminiModel: optional('GEMINI_MODEL', 'gemini-3.7-flash'),
+  geminiFallbackModel: optional('GEMINI_FALLBACK_MODEL', ''),
   systemPrompt: optional('SYSTEM_PROMPT', '') || DEFAULT_SYSTEM_PROMPT,
 
   // Behavior
   respondInPrivate: optionalBool('RESPOND_IN_PRIVATE', true),
   maxInputChars: optionalInt('MAX_INPUT_CHARS', 8000),
   maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 10),
-  rateLimitPerMinute: optionalInt('RATE_LIMIT_PER_MINUTE', 10),
 
   // Legacy VPSMurah (optional fallback)
   vpsmurahApiKey: optional('VPSMURAH_API_KEY', ''),

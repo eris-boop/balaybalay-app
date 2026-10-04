@@ -53,12 +53,12 @@ ADMIN_TOKEN=buat_token_rahasia_anda_disini_123456
 # Google Gemini AI (dari Google AI Studio)
 GEMINI_API_KEY=AIzaSy...
 GEMINI_MODEL=gemini-3.7-flash
+GEMINI_FALLBACK_MODEL=
 
 # Perilaku Bot
 RESPOND_IN_PRIVATE=true
 MAX_INPUT_CHARS=8000
 MAX_HISTORY_MESSAGES=10
-RATE_LIMIT_PER_MINUTE=10
 
 # System Prompt Kustom (Opsional)
 SYSTEM_PROMPT=Kamu adalah asisten WhatsApp yang ramah, ringkas, dan cerdas.

@@ -69,6 +69,5 @@ export const logger = {
   gemini: createLogger('GEMINI'),
   error: createLogger('ERROR'),
   server: createLogger('SERVER'),
-  rateLimit: createLogger('RATE_LIMIT'),
   polling: createLogger('POLLING'),
 };

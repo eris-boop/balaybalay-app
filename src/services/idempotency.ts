@@ -85,6 +85,10 @@ class IdempotencyCache {
     }
   }
 
+  clear(): void {
+    this.cache.clear();
+  }
+
   destroy(): void {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);

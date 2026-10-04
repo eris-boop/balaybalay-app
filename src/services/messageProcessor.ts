@@ -2,7 +2,8 @@
  * Unified incoming message processor.
  * Used by Baileys WebSocket handler and webhook fallback.
  *
- * Filters:
+ * Features:
+ * - Per-chat concurrency queue (mutex) to prevent race conditions on conversation history
  * - Ignores self messages (isFromMe or sender is bot)
  * - Ignores non-text messages
  * - Ignores empty text
@@ -11,22 +12,35 @@
  * - In private chats (@s.whatsapp.net or @lid): responds directly without mention
  * - Rate limits per sender
  * - Cleans mention from prompt before calling Gemini
- * - Persists conversation history
+ * - Persists conversation history only upon successful Gemini generation
+ * - Never saves fallback/error messages into conversation history
  * - Sends reply via WhatsApp service to exact remoteJid
  */
 
 import { IncomingMessage } from '../types/whatsapp';
 import { isBotMentioned, stripBotMention } from './mention';
-import { generateReply } from './gemini';
+import { generateReply, GeminiProviderError } from './gemini';
 import { sendMessage } from './whatsapp';
 import { memory } from './memory';
 import { idempotency, generateDeterministicKey } from './idempotency';
-import { rateLimiter } from './rateLimit';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getBotIdentifiers, recordGeminiTimestamp } from './whatsappClient';
+import { chatQueue } from '../utils/queue';
 
+/**
+ * Process an incoming message with per-chat serialization.
+ */
 export async function processIncomingMessage(message: IncomingMessage): Promise<boolean> {
+  return chatQueue.run(message.chatId, async () => {
+    return executeMessageProcessing(message);
+  });
+}
+
+/**
+ * Core processing logic for an incoming message.
+ */
+async function executeMessageProcessing(message: IncomingMessage): Promise<boolean> {
   // Guard 1: ignore messages sent by the bot itself
   if (message.isFromMe) {
     logger.whatsapp.info('message ignored reason=fromMe');
@@ -72,18 +86,6 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
     }
   }
 
-  // Guard 6: rate limiting
-  const rateLimitKey = message.senderId || message.chatId;
-  if (rateLimiter.isRateLimited(rateLimitKey)) {
-    if (rateLimiter.isFirstWarning(rateLimitKey)) {
-      await sendMessage(
-        message.chatId,
-        'Mohon tunggu sebentar ya, kamu mengirim pesan terlalu cepat. 🙏'
-      );
-    }
-    return false;
-  }
-
   // Prepare prompt: strip bot mention from group messages
   let prompt = message.text;
   if (message.isGroup) {
@@ -96,16 +98,17 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
   // If prompt is empty after removing mention, send friendly greeting
   if (!prompt.trim()) {
     await sendMessage(message.chatId, 'Halo 👋 Ada yang bisa saya bantu?');
+    logger.whatsapp.info('reply sent');
     return true;
   }
 
-  // Retrieve chat history
+  // 1. Retrieve previous conversation history (clean, unpolluted)
   const history = memory.getHistory(message.chatId);
 
   try {
     recordGeminiTimestamp();
 
-    // Generate AI reply via Gemini
+    // 2. Generate AI reply via Gemini with previous history + current prompt
     const reply = await generateReply({
       message: prompt,
       senderName: message.senderName,
@@ -113,7 +116,7 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
       history,
     });
 
-    // Store user message & assistant reply in conversation memory
+    // 3. Save memory ONLY after Gemini generation succeeds
     memory.addEntry(message.chatId, {
       role: 'user',
       content: prompt,
@@ -126,19 +129,31 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
       timestamp: Date.now(),
     });
 
-    // Send reply back to EXACT remoteJid
+    // 4. Send reply back to EXACT remoteJid
     await sendMessage(message.chatId, reply);
+    logger.whatsapp.info('reply sent');
     return true;
   } catch (err) {
-    const errMsg = (err as Error).message;
-    logger.error.error('Gemini processing failed, handled gracefully:', errMsg);
+    const error = err as any;
+    logger.error.error('Gemini processing failed, handled gracefully:', error?.message || String(error));
+
+    // Determine fallback text based on provider error
+    let fallbackText = 'AI sedang mengalami gangguan sementara. Coba lagi ya.';
+    if (
+      (error instanceof GeminiProviderError && error.isRateLimit) ||
+      error?.isRateLimit ||
+      String(error?.message).includes('429') ||
+      String(error?.message).includes('RESOURCE_EXHAUSTED')
+    ) {
+      fallbackText = 'AI sedang ramai sebentar. Coba lagi beberapa saat ya.';
+    }
+
+    // Send friendly user fallback; DO NOT save fallback error to conversation history!
     try {
-      await sendMessage(
-        message.chatId,
-        'Maaf, saya sedang mengalami kendala teknis saat memproses pesan Anda. Silakan coba lagi sebentar ya.'
-      );
+      await sendMessage(message.chatId, fallbackText);
+      logger.whatsapp.info('reply sent');
     } catch {
-      // ignore secondary error
+      // ignore secondary send failure
     }
     return false;
   }
