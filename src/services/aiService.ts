@@ -23,6 +23,8 @@ export interface GenerateReplyParams {
   history: ConversationEntry[];
   summary?: string | null;
   relevantOldMessages?: ConversationEntry[];
+  globalRelevantMessages?: ConversationEntry[];
+  globalSummary?: string | null;
 }
 
 // Diagnostics state
@@ -344,14 +346,23 @@ export function formatOpenAIHistory(
   systemPrompt?: string,
   maxPairs = config.maxHistoryMessages,
   summary?: string | null,
-  relevantOldMessages?: ConversationEntry[]
+  relevantOldMessages?: ConversationEntry[],
+  globalRelevantMessages?: ConversationEntry[],
+  globalSummary?: string | null
 ): OpenAIMessage[] {
   const messages: OpenAIMessage[] = [];
 
-  // 1. System Prompt + Long-Term Memory Summary
+  // 1. System Prompt + Global Summary + Per-Chat Summary
   let effectiveSystemPrompt = (systemPrompt || config.systemPrompt || '').trim();
+
+  // Global long-term summary
+  if (globalSummary && globalSummary.trim()) {
+    effectiveSystemPrompt += `\n\n[MEMORI GLOBAL JANGKA PANJANG]\n${globalSummary.trim()}`;
+  }
+
+  // Per-chat long-term summary
   if (summary && summary.trim()) {
-    effectiveSystemPrompt += `\n\n[MEMORI JANGKA PANJANG]\n${summary.trim()}`;
+    effectiveSystemPrompt += `\n\n[MEMORI PERCAKAPAN INI]\n${summary.trim()}`;
   }
 
   if (effectiveSystemPrompt) {
@@ -361,7 +372,18 @@ export function formatOpenAIHistory(
     });
   }
 
-  // 2. Relevant Old Messages (from Full-Text Search, if any)
+  // 2. Global Relevant Messages (cross-chat, if any)
+  if (globalRelevantMessages && globalRelevantMessages.length > 0) {
+    const cleanGlobal = sanitizeHistory(globalRelevantMessages, config.globalMemoryRetrievalLimit);
+    for (const entry of cleanGlobal) {
+      messages.push({
+        role: entry.role,
+        content: `[Info dari percakapan lain] ${entry.content}`,
+      });
+    }
+  }
+
+  // 3. Per-Chat Relevant Old Messages (from Full-Text Search, if any)
   if (relevantOldMessages && relevantOldMessages.length > 0) {
     const cleanRelevant = sanitizeHistory(relevantOldMessages, config.memoryRetrievalLimit);
     for (const entry of cleanRelevant) {
@@ -372,7 +394,7 @@ export function formatOpenAIHistory(
     }
   }
 
-  // 3. Previous History (Cleaned & Validated)
+  // 4. Previous History (Cleaned & Validated)
   const cleanHistory = sanitizeHistory(history, maxPairs);
   for (const entry of cleanHistory) {
     messages.push({
@@ -381,7 +403,7 @@ export function formatOpenAIHistory(
     });
   }
 
-  // 4. Current User Message
+  // 5. Current User Message
   messages.push({
     role: 'user',
     content: currentPrompt,
@@ -461,7 +483,9 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     config.systemPrompt,
     config.maxHistoryMessages,
     params.summary,
-    params.relevantOldMessages
+    params.relevantOldMessages,
+    params.globalRelevantMessages,
+    params.globalSummary
   );
 
   const { categoryChain, emergencyChain } = getModelChainsForTask(taskType);

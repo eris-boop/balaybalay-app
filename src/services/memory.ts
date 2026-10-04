@@ -1,10 +1,12 @@
 /**
- * Unified Conversation Memory Service.
+ * Unified Conversation Memory Service with Global Shared Memory.
  *
  * Provides:
  * 1. Synchronous in-memory store for fallback, unit tests, and fast access.
  * 2. Asynchronous PostgreSQL persistent memory with full-text search and long-term summaries.
- * 3. Graceful degradation: if PostgreSQL is unavailable, automatically falls back to in-memory.
+ * 3. Global cross-chat memory retrieval for shared knowledge.
+ * 4. Separate user/assistant message persistence.
+ * 5. Graceful degradation: if PostgreSQL is unavailable, automatically falls back to in-memory.
  */
 
 import { ConversationEntry } from '../types/whatsapp';
@@ -13,7 +15,11 @@ import { logger } from '../utils/logger';
 import { isDatabaseConnected, getDbPool } from '../database/db';
 import {
   loadConversationContext,
+  saveUserMessage,
+  saveAssistantMessage,
   saveSuccessfulTurn,
+  SaveUserMessageParams,
+  SaveAssistantMessageParams,
   SaveTurnParams,
   LoadedContext,
 } from '../database/memoryRepository';
@@ -27,6 +33,8 @@ export interface MemoryStore {
   clearAll(): void;
   loadContext(chatId: string, currentPrompt: string): Promise<LoadedContext>;
   saveTurn(params: SaveTurnParams): Promise<void>;
+  saveUserMsg(params: SaveUserMessageParams): Promise<void>;
+  saveAssistantMsg(params: SaveAssistantMessageParams): Promise<void>;
   deleteConversation(chatId: string): Promise<boolean>;
 }
 
@@ -37,6 +45,8 @@ export interface MemoryDiagnostics {
   lastMemoryRecentCount: number;
   lastMemoryRelevantCount: number;
   lastMemorySummaryUsed: boolean;
+  lastGlobalMemoryCount: number;
+  lastGlobalMemorySummaryUsed: boolean;
 }
 
 const memoryDiagnostics: MemoryDiagnostics = {
@@ -46,6 +56,8 @@ const memoryDiagnostics: MemoryDiagnostics = {
   lastMemoryRecentCount: 0,
   lastMemoryRelevantCount: 0,
   lastMemorySummaryUsed: false,
+  lastGlobalMemoryCount: 0,
+  lastGlobalMemorySummaryUsed: false,
 };
 
 export function getMemoryDiagnostics(): MemoryDiagnostics {
@@ -59,6 +71,8 @@ export function resetMemoryDiagnostics(): void {
   memoryDiagnostics.lastMemoryRecentCount = 0;
   memoryDiagnostics.lastMemoryRelevantCount = 0;
   memoryDiagnostics.lastMemorySummaryUsed = false;
+  memoryDiagnostics.lastGlobalMemoryCount = 0;
+  memoryDiagnostics.lastGlobalMemorySummaryUsed = false;
 }
 
 class HybridMemoryStore implements MemoryStore {
@@ -110,6 +124,8 @@ class HybridMemoryStore implements MemoryStore {
    * - Recent history
    * - Long-term memory summary
    * - Relevant old messages via full-text search
+   * - Global cross-chat relevant messages (if enabled)
+   * - Global summary (if enabled)
    * Falls back to in-memory store if database is offline.
    */
   async loadContext(chatId: string, currentPrompt: string): Promise<LoadedContext> {
@@ -133,26 +149,73 @@ class HybridMemoryStore implements MemoryStore {
     const recentHistory = dbContext ? dbContext.recentHistory : this.getHistory(chatId);
     const summary = dbContext ? dbContext.summary : null;
     const relevantOldMessages = dbContext ? dbContext.relevantOldMessages : [];
+    const globalRelevantMessages = dbContext ? dbContext.globalRelevantMessages : [];
+    const globalSummary = dbContext ? dbContext.globalSummary : null;
 
     memoryDiagnostics.lastMemoryLoadAt = new Date().toISOString();
     memoryDiagnostics.lastMemoryChatFound = hasPool ? chatFound : (this.inMemoryStore.has(chatId) ? true : null);
     memoryDiagnostics.lastMemoryRecentCount = recentHistory.length;
     memoryDiagnostics.lastMemoryRelevantCount = relevantOldMessages.length;
     memoryDiagnostics.lastMemorySummaryUsed = Boolean(summary);
+    memoryDiagnostics.lastGlobalMemoryCount = globalRelevantMessages.length;
+    memoryDiagnostics.lastGlobalMemorySummaryUsed = Boolean(globalSummary);
 
     logger.memory.info(
-      `[memory] loaded recent=${recentHistory.length} relevant=${relevantOldMessages.length} summary=${Boolean(summary)}`
+      `[memory] loaded recent=${recentHistory.length} relevant=${relevantOldMessages.length} global-relevant=${globalRelevantMessages.length} summary=${Boolean(summary)} globalSummary=${Boolean(globalSummary)}`
     );
 
     return {
       recentHistory,
       summary,
       relevantOldMessages,
+      globalRelevantMessages,
+      globalSummary,
     };
   }
 
   /**
-   * Transactionally save successful conversation turn into both
+   * Save a user message to PostgreSQL BEFORE AI call.
+   * Persists directly to database without polluting active in-memory multi-turn cache
+   * until turn completion.
+   */
+  async saveUserMsg(params: SaveUserMessageParams): Promise<void> {
+    // Persist to PostgreSQL if available
+    if (getDbPool()) {
+      try {
+        await saveUserMessage(params);
+        logger.memory.info('[memory] user-message persisted');
+      } catch (err) {
+        logger.database.warn('[DATABASE] unavailable - user message persistence failed:', (err as Error).message);
+      }
+    }
+
+    memoryDiagnostics.lastMemorySaveAt = new Date().toISOString();
+  }
+
+  /**
+   * Save an assistant message to PostgreSQL AFTER AI succeeds.
+   */
+  async saveAssistantMsg(params: SaveAssistantMessageParams): Promise<void> {
+    if (isFallbackOrErrorText(params.content)) {
+      logger.memory.warn('Attempted to save fallback/error reply, skipping save');
+      return;
+    }
+
+    // Persist to PostgreSQL if available
+    if (getDbPool()) {
+      try {
+        await saveAssistantMessage(params);
+        logger.memory.info('[memory] assistant-response persisted');
+      } catch (err) {
+        logger.database.warn('[DATABASE] unavailable - assistant message persistence failed:', (err as Error).message);
+      }
+    }
+
+    memoryDiagnostics.lastMemorySaveAt = new Date().toISOString();
+  }
+
+  /**
+   * Legacy: Transactionally save successful conversation turn into both
    * persistent PostgreSQL storage and in-memory cache.
    */
   async saveTurn(params: SaveTurnParams): Promise<void> {

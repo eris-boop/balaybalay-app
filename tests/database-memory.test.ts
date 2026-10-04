@@ -184,10 +184,21 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
 
     // INSERT INTO messages (user)
     if (cleanSql.includes("INSERT INTO messages") && cleanSql.includes("'user'")) {
-      const convId = params[0];
-      const messageId = params[1] || null;
-      const senderId = params[2] || null;
-      const content = params[3];
+      let convId: number;
+      let messageId: string | null = null;
+      let senderId: string | null = null;
+      let content: string;
+      if (cleanSql.includes('chat_id')) {
+        convId = params[0];
+        messageId = params[2] || null;
+        senderId = params[3] || null;
+        content = params[4];
+      } else {
+        convId = params[0];
+        messageId = params[1] || null;
+        senderId = params[2] || null;
+        content = params[3];
+      }
 
       if (messageId && data.messages.some((m) => m.message_id === messageId)) {
         // ON CONFLICT DO NOTHING
@@ -211,10 +222,21 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
 
     // INSERT INTO messages (assistant)
     if (cleanSql.includes("INSERT INTO messages") && cleanSql.includes("'assistant'")) {
-      const convId = params[0];
-      const content = params[1];
-      const modelUsed = params[2] || null;
-      const taskType = params[3] || null;
+      let convId: number;
+      let content: string;
+      let modelUsed: string | null = null;
+      let taskType: string | null = null;
+      if (cleanSql.includes('chat_id')) {
+        convId = params[0];
+        content = params[2];
+        modelUsed = params[3] || null;
+        taskType = params[4] || null;
+      } else {
+        convId = params[0];
+        content = params[1];
+        modelUsed = params[2] || null;
+        taskType = params[3] || null;
+      }
 
       const msg = {
         id: nextMsgId++,
@@ -234,7 +256,7 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
     // SELECT COUNT(*) as count FROM messages WHERE conversation_id
     if (cleanSql.includes('COUNT(*) as count FROM messages')) {
       const convId = params[0];
-      const count = data.messages.filter((m) => m.conversation_id === convId).length;
+      const count = data.messages.filter((m) => (convId ? m.conversation_id === convId : true)).length;
       return { rows: [{ count: String(count) }], rowCount: 1 };
     }
 
@@ -258,20 +280,59 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
 
     // SELECT messages with Full-Text Search
     if (cleanSql.includes('to_tsvector') && cleanSql.includes('messages')) {
-      const convId = params[0];
-      const queryText = (params[1] || '').toLowerCase();
-      const excludeIds = params[2] || [];
-      const limit = params[3] || 6;
+      if (cleanSql.includes('conversation_id !=')) {
+        const queryText = (params[0] || '').toLowerCase();
+        const convId = params[1];
+        const excludeIds = params[2] || [];
+        const limit = params[3] || 12;
 
-      const matched = data.messages.filter((m) => {
-        if (m.conversation_id !== convId) return false;
-        if (Array.isArray(excludeIds) && excludeIds.includes(m.id)) return false;
-        // Simple mock full-text keyword matching
-        const words = queryText.split(/\s+/).filter(Boolean);
-        return words.some((w: string) => m.content.toLowerCase().includes(w));
-      }).slice(0, limit);
+        const matched = data.messages
+          .filter((m) => {
+            if (m.conversation_id === convId) return false;
+            if (Array.isArray(excludeIds) && excludeIds.includes(m.id)) return false;
+            const words = queryText.split(/\s+/).filter(Boolean);
+            return words.some((w: string) => m.content && m.content.toLowerCase().includes(w));
+          })
+          .slice(0, limit);
 
-      return { rows: matched, rowCount: matched.length };
+        return { rows: matched, rowCount: matched.length };
+      } else if (cleanSql.includes('conversation_id = $1') || cleanSql.includes('conversation_id =')) {
+        const convId = params[0];
+        const queryText = (params[1] || '').toLowerCase();
+        const excludeIds = params[2] || [];
+        const limit = params[3] || 6;
+
+        const matched = data.messages
+          .filter((m) => {
+            if (m.conversation_id !== convId) return false;
+            if (Array.isArray(excludeIds) && excludeIds.includes(m.id)) return false;
+            const words = queryText.split(/\s+/).filter(Boolean);
+            return words.some((w: string) => m.content && m.content.toLowerCase().includes(w));
+          })
+          .slice(0, limit);
+
+        return { rows: matched, rowCount: matched.length };
+      } else {
+        const queryText = (params[0] || '').toLowerCase();
+        const limit = params[1] || 12;
+
+        const matched = data.messages
+          .filter((m) => {
+            const words = queryText.split(/\s+/).filter(Boolean);
+            return words.some((w: string) => m.content && m.content.toLowerCase().includes(w));
+          })
+          .slice(0, limit);
+
+        return { rows: matched, rowCount: matched.length };
+      }
+    }
+
+    // global_memory queries
+    if (cleanSql.includes('FROM global_memory')) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (cleanSql.includes('INSERT INTO global_memory')) {
+      return { rows: [], rowCount: 1 };
     }
 
     // conversation_memories queries
@@ -367,9 +428,9 @@ describe('PostgreSQL Persistent Memory Suite', () => {
     expect(mockDb.data.messages[1].model_used).toBe('gemini-38');
   });
 
-  // 4. failed AI message not saved
-  // 5. fallback error not saved
-  it('4 & 5. does not save failed prompt or fallback error text into database', async () => {
+  // 4. persists user message before AI call
+  // 5. fallback error not saved into database
+  it('4 & 5. persists user prompt to DB even when AI fails, but never saves fallback error into DB', async () => {
     vi.spyOn(geminiService, 'generateReply').mockRejectedValue(new Error('503 Service Unavailable'));
     vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue(true as any);
 
@@ -388,9 +449,13 @@ describe('PostgreSQL Persistent Memory Suite', () => {
 
     await processIncomingMessage(msg);
 
-    // Database messages should remain empty
-    expect(mockDb.data.messages.length).toBe(0);
-    // In-memory history should also remain empty
+    // User message is preserved in database even if AI fails
+    expect(mockDb.data.messages.length).toBe(1);
+    expect(mockDb.data.messages[0].role).toBe('user');
+    expect(mockDb.data.messages[0].content).toBe('Prompt yang gagal');
+    // Assistant error message is NOT saved to database
+    expect(mockDb.data.messages.some((m: any) => m.role === 'assistant')).toBe(false);
+    // In-memory active multi-turn history should also remain empty to prevent poisoning next turn
     expect(memory.getHistory('628999@s.whatsapp.net')).toHaveLength(0);
   });
 

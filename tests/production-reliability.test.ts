@@ -126,10 +126,21 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
 
     // INSERT INTO messages (user)
     if (cleanSql.includes("INSERT INTO messages") && cleanSql.includes("'user'")) {
-      const convId = params[0];
-      const messageId = params[1] || null;
-      const senderId = params[2] || null;
-      const content = params[3];
+      let convId: number;
+      let messageId: string | null = null;
+      let senderId: string | null = null;
+      let content: string;
+      if (cleanSql.includes('chat_id')) {
+        convId = params[0];
+        messageId = params[2] || null;
+        senderId = params[3] || null;
+        content = params[4];
+      } else {
+        convId = params[0];
+        messageId = params[1] || null;
+        senderId = params[2] || null;
+        content = params[3];
+      }
 
       if (messageId && data.messages.some((m) => m.message_id === messageId)) {
         return { rows: [], rowCount: 0 };
@@ -152,10 +163,21 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
 
     // INSERT INTO messages (assistant)
     if (cleanSql.includes("INSERT INTO messages") && cleanSql.includes("'assistant'")) {
-      const convId = params[0];
-      const content = params[1];
-      const modelUsed = params[2] || null;
-      const taskType = params[3] || null;
+      let convId: number;
+      let content: string;
+      let modelUsed: string | null = null;
+      let taskType: string | null = null;
+      if (cleanSql.includes('chat_id')) {
+        convId = params[0];
+        content = params[2];
+        modelUsed = params[3] || null;
+        taskType = params[4] || null;
+      } else {
+        convId = params[0];
+        content = params[1];
+        modelUsed = params[2] || null;
+        taskType = params[3] || null;
+      }
 
       const msg = {
         id: nextMsgId++,

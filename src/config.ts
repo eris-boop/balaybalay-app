@@ -40,7 +40,9 @@ function optionalBool(key: string, fallback: boolean): boolean {
 const DEFAULT_SYSTEM_PROMPT = `Kamu adalah asisten WhatsApp yang membantu, akurat, ringkas, dan natural.
 Jawab dengan bahasa yang sama dengan pengguna kecuali pengguna meminta bahasa lain.
 Jangan mengatakan bahwa kamu memiliki akses ke data atau fitur yang sebenarnya tidak tersedia.
-Gunakan formatting WhatsApp yang sederhana.`;
+Gunakan formatting WhatsApp yang sederhana.
+Kamu memiliki memori lintas percakapan. Jika kamu menerima konteks dari percakapan sebelumnya, gunakan informasi tersebut dengan bijak.
+Jika informasi berasal dari percakapan sebelumnya, sebutkan bahwa itu berdasarkan percakapan sebelumnya, bukan fakta terverifikasi independen.`;
 
 const defaultAuthDir = process.env.WHATSAPP_AUTH_DIR ||
   (process.platform === 'win32'
@@ -74,15 +76,15 @@ const DEFAULT_MODEL_CHAIN =
   'gemini-38,gemini-37,gemini-36,gemini-35,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
 
 const DEFAULT_GENERAL_CHAIN =
-  'gemini-38,qwen3-flash,gemini-37,gemini-36,gpt-5-mini,gpt-4o-mini,mistral-small';
+  'gemini-38,qwen3-flash,gpt-5-mini,gemini-37,gemini-36,gpt-4o-mini,mistral-small';
 const DEFAULT_CODING_CHAIN =
   'qwen3-coder,gemini-38,gpt-53-codex,deepseek-coder,codestral,gpt-5-mini';
 const DEFAULT_REASONING_CHAIN =
-  'gemini-38,gemini-37,qwen3-plus,deepseek-r1,kimi-k3,gpt-55';
+  'gemini-38,qwen3-plus,gpt-5-mini,gemini-37,deepseek-r1,kimi-k3,gpt-55';
 const DEFAULT_LONGFORM_CHAIN =
   'gemini-38,gemini-37,qwen3-max,gpt-55,llama-4-maverick';
 const DEFAULT_EMERGENCY_CHAIN =
-  'qwen3-flash,gpt-5-mini,llama-4-scout,mistral-small';
+  'qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small,llama-4-scout';
 
 export const config = {
   port: optionalInt('PORT', 3000),
@@ -107,12 +109,12 @@ export const config = {
   aiReasoningChain: parseModelChain(optional('AI_REASONING_CHAIN', DEFAULT_REASONING_CHAIN)),
   aiLongformChain: parseModelChain(optional('AI_LONGFORM_CHAIN', DEFAULT_LONGFORM_CHAIN)),
   aiEmergencyChain: parseModelChain(optional('AI_EMERGENCY_CHAIN', DEFAULT_EMERGENCY_CHAIN)),
-  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 7000),
-  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 25000),
+  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 8000),
+  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 30000),
   aiDirectGeminiFallback: optionalBool('AI_DIRECT_GEMINI_FALLBACK', true),
   circuitBreakerFailures: optionalInt('CIRCUIT_BREAKER_FAILURES', 3),
   circuitBreakerCooldownMs: optionalInt('CIRCUIT_BREAKER_COOLDOWN_MS', 30000),
-  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 30000),
+  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 35000),
 
   // Google Gemini AI (Direct SDK fallback)
   geminiApiKey: optional('GEMINI_API_KEY', ''),
@@ -123,7 +125,7 @@ export const config = {
   // Behavior
   respondInPrivate: optionalBool('RESPOND_IN_PRIVATE', true),
   maxInputChars: optionalInt('MAX_INPUT_CHARS', 8000),
-  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 20),
+  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 25),
 
   // PostgreSQL Persistent Memory
   databaseUrl: optional('DATABASE_URL', ''),
@@ -131,8 +133,20 @@ export const config = {
   memorySummaryAfterMessages: optionalInt('MEMORY_SUMMARY_AFTER_MESSAGES', 30),
   memorySummaryKeepRecent: optionalInt('MEMORY_SUMMARY_KEEP_RECENT', 20),
   memoryRetrievalEnabled: optionalBool('MEMORY_RETRIEVAL_ENABLED', true),
-  memoryRetrievalLimit: optionalInt('MEMORY_RETRIEVAL_LIMIT', 6),
-  memoryMaxContextChars: optionalInt('MEMORY_MAX_CONTEXT_CHARS', 12000),
+  memoryRetrievalLimit: optionalInt('MEMORY_RETRIEVAL_LIMIT', 10),
+  memoryMaxContextChars: optionalInt('MEMORY_MAX_CONTEXT_CHARS', 22000),
+
+  // Global Memory
+  globalMemoryEnabled: optionalBool('GLOBAL_MEMORY_ENABLED', true),
+  globalMemoryCrossChat: optionalBool('GLOBAL_MEMORY_CROSS_CHAT', true),
+  globalMemoryScope: optional('GLOBAL_MEMORY_SCOPE', 'shared_global'),
+  globalMemoryRetrievalLimit: optionalInt('GLOBAL_MEMORY_RETRIEVAL_LIMIT', 12),
+  globalMemorySummaryAfterMessages: optionalInt('GLOBAL_MEMORY_SUMMARY_AFTER_MESSAGES', 50),
+  globalMemorySummaryKeepRecent: optionalInt('GLOBAL_MEMORY_SUMMARY_KEEP_RECENT', 30),
+
+  // Group memory behavior
+  groupStoreProcessedMessages: optionalBool('GROUP_STORE_PROCESSED_MESSAGES', true),
+  groupArchiveAllText: optionalBool('GROUP_ARCHIVE_ALL_TEXT', false),
 
   // Profanity Filter
   profanityFilterEnabled: optionalBool('PROFANITY_FILTER_ENABLED', true),

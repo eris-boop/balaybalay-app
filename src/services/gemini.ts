@@ -24,6 +24,8 @@ export interface GenerateReplyParams {
   history: ConversationEntry[];
   summary?: string | null;
   relevantOldMessages?: ConversationEntry[];
+  globalRelevantMessages?: ConversationEntry[];
+  globalSummary?: string | null;
 }
 
 /**
@@ -239,8 +241,9 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
     currentPrompt = `[${senderName}]: ${truncatedMessage}`;
   }
 
-  // Merge relevant old messages with history if present
+  // Merge relevant old messages and global memory with history if present
   const allHistory = [
+    ...(params.globalRelevantMessages || []),
     ...(params.relevantOldMessages || []),
     ...history,
   ];
@@ -268,8 +271,11 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
 
   // Only pass systemInstruction if configured and non-empty
   let effectiveSystemPrompt = (config.systemPrompt || '').trim();
+  if (params.globalSummary && params.globalSummary.trim()) {
+    effectiveSystemPrompt += `\n\n[MEMORI GLOBAL JANGKA PANJANG]\n${params.globalSummary.trim()}`;
+  }
   if (params.summary && params.summary.trim()) {
-    effectiveSystemPrompt += `\n\n[MEMORI JANGKA PANJANG]\n${params.summary.trim()}`;
+    effectiveSystemPrompt += `\n\n[MEMORI PERCAKAPAN INI]\n${params.summary.trim()}`;
   }
 
   if (effectiveSystemPrompt !== '') {

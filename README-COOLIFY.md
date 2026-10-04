@@ -73,16 +73,26 @@ ADMIN_TOKEN=buat_token_rahasia_anda_disini_123456
 # PostgreSQL Database (Coolify Internal Resource)
 DATABASE_URL=postgresql://postgres:password123@balaybalay-postgres:5432/balaybalay
 
-# Persistent Memory & Summarization
-MAX_HISTORY_MESSAGES=20
+# Shared Global Memory (Cross-Chat Cross-Group Knowledge)
+GLOBAL_MEMORY_ENABLED=true
+GLOBAL_MEMORY_CROSS_CHAT=true
+GLOBAL_MEMORY_SCOPE=shared_global
+GLOBAL_MEMORY_RETRIEVAL_LIMIT=12
+GLOBAL_MEMORY_SUMMARY_AFTER_MESSAGES=50
+GLOBAL_MEMORY_SUMMARY_KEEP_RECENT=30
+
+# Per-Chat Memory & History
+MAX_HISTORY_MESSAGES=25
 MEMORY_SUMMARY_ENABLED=true
 MEMORY_SUMMARY_AFTER_MESSAGES=30
 MEMORY_SUMMARY_KEEP_RECENT=20
-
-# Full-Text Search Retrieval
 MEMORY_RETRIEVAL_ENABLED=true
-MEMORY_RETRIEVAL_LIMIT=6
-MEMORY_MAX_CONTEXT_CHARS=12000
+MEMORY_RETRIEVAL_LIMIT=10
+MEMORY_MAX_CONTEXT_CHARS=22000
+
+# Group Archival Policy
+GROUP_STORE_PROCESSED_MESSAGES=true
+GROUP_ARCHIVE_ALL_TEXT=false
 
 # Profanity Filter (Bot Output Masking)
 PROFANITY_FILTER_ENABLED=true
@@ -95,16 +105,16 @@ VPSMURAH_AI_BASE_URL=https://my.vpsmurah.co.id/api/v1
 VPSMURAH_AI_API_KEY=vps_ai_live_...
 
 # Smart Category Chains (Gemini top priority)
-AI_GENERAL_CHAIN=gemini-38,gemini-37,gemini-36,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small
-AI_CODING_CHAIN=gemini-38,gpt-53-codex,qwen3-coder,deepseek-coder,codestral,gpt-5-mini
-AI_REASONING_CHAIN=gemini-38,gemini-37,qwen3-plus,deepseek-r1,kimi-k3,gpt-55
+AI_GENERAL_CHAIN=gemini-38,qwen3-flash,gpt-5-mini,gemini-37,gemini-36,gpt-4o-mini,mistral-small
+AI_CODING_CHAIN=qwen3-coder,gemini-38,gpt-53-codex,deepseek-coder,codestral,gpt-5-mini
+AI_REASONING_CHAIN=gemini-38,qwen3-plus,gpt-5-mini,gemini-37,deepseek-r1,kimi-k3,gpt-55
 AI_LONGFORM_CHAIN=gemini-38,gemini-37,qwen3-max,gpt-55,llama-4-maverick
-AI_EMERGENCY_CHAIN=qwen3-flash,gpt-5-mini,llama-4-scout,mistral-small
+AI_EMERGENCY_CHAIN=qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small,llama-4-scout
 
 # Timeouts & Deadlines
-AI_MODEL_TIMEOUT_MS=4000
-AI_TOTAL_TIMEOUT_MS=10000
-CHAT_JOB_TIMEOUT_MS=12000
+AI_MODEL_TIMEOUT_MS=8000
+AI_TOTAL_TIMEOUT_MS=30000
+CHAT_JOB_TIMEOUT_MS=35000
 
 # Direct Google Gemini Fallback (Optional Last Resort)
 AI_DIRECT_GEMINI_FALLBACK=true
@@ -116,7 +126,7 @@ RESPOND_IN_PRIVATE=true
 MAX_INPUT_CHARS=8000
 
 # System Prompt Kustom (Opsional)
-SYSTEM_PROMPT=Kamu adalah asisten WhatsApp yang ramah, ringkas, dan cerdas.
+SYSTEM_PROMPT=Kamu adalah asisten WhatsApp cerdas yang ramah, ringkas, dan faktual. Jika ada informasi dari percakapan sebelumnya, sebutkan sebagai informasi yang pernah didiskusikan sebelumnya secara wajar tanpa mengklaimnya sebagai kebenaran mutlak.
 ```
 
 > ⚠️ **Catatan Penting Keamanan:**

@@ -138,12 +138,17 @@ adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
     persistentMemory: dbConnected,
     memorySummaryEnabled: config.memorySummaryEnabled,
     memoryRetrievalEnabled: config.memoryRetrievalEnabled,
+    globalMemoryEnabled: config.globalMemoryEnabled,
+    globalMemoryScope: config.globalMemoryScope,
+    globalMemoryCrossChat: config.globalMemoryCrossChat,
     lastMemoryLoadAt: memDiag.lastMemoryLoadAt,
     lastMemorySaveAt: memDiag.lastMemorySaveAt,
     lastMemoryChatFound: memDiag.lastMemoryChatFound,
     lastMemoryRecentCount: memDiag.lastMemoryRecentCount,
     lastMemoryRelevantCount: memDiag.lastMemoryRelevantCount,
     lastMemorySummaryUsed: memDiag.lastMemorySummaryUsed,
+    lastGlobalMemoryCount: memDiag.lastGlobalMemoryCount,
+    lastGlobalMemorySummaryUsed: memDiag.lastGlobalMemorySummaryUsed,
   });
 });
 

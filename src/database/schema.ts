@@ -2,6 +2,7 @@
  * Database Schema & Idempotent Migrations.
  *
  * Ensures all required tables and indexes exist without dropping existing data.
+ * All migrations are additive (ADD COLUMN IF NOT EXISTS, CREATE TABLE IF NOT EXISTS).
  */
 
 import { Pool, PoolClient } from 'pg';
@@ -52,12 +53,73 @@ CREATE INDEX IF NOT EXISTS idx_conversation_memories_conversation_id ON conversa
 `;
 
 /**
+ * Additive migration SQL for global memory support.
+ * Uses DO $$ blocks to check column existence before adding.
+ */
+export const GLOBAL_MEMORY_MIGRATION_SQL = `
+-- Add memory_eligible column to messages (default true)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'messages' AND column_name = 'memory_eligible'
+  ) THEN
+    ALTER TABLE messages ADD COLUMN memory_eligible BOOLEAN NOT NULL DEFAULT true;
+  END IF;
+END $$;
+
+-- Add source_type column to messages
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'messages' AND column_name = 'source_type'
+  ) THEN
+    ALTER TABLE messages ADD COLUMN source_type VARCHAR(50) NOT NULL DEFAULT 'private';
+  END IF;
+END $$;
+
+-- Add chat_id column directly to messages for global queries
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'messages' AND column_name = 'chat_id'
+  ) THEN
+    ALTER TABLE messages ADD COLUMN chat_id VARCHAR(255);
+  END IF;
+END $$;
+
+-- Indexes for global memory retrieval
+CREATE INDEX IF NOT EXISTS idx_messages_memory_eligible ON messages(memory_eligible);
+CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
+CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
+
+-- GIN index for full-text search across all messages
+CREATE INDEX IF NOT EXISTS idx_messages_content_fts ON messages USING gin(to_tsvector('simple', content));
+
+-- 4. Global Memory table (shared long-term summary)
+CREATE TABLE IF NOT EXISTS global_memory (
+  id SERIAL PRIMARY KEY,
+  summary TEXT NOT NULL,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+`;
+
+/**
  * Initialize schema idempotently.
  */
 export async function ensureSchema(runner: Pool | PoolClient): Promise<void> {
   try {
     await runner.query(SCHEMA_SQL);
     logger.database.info('Database schema verified/migrated successfully');
+
+    // Run global memory migration (additive, safe to re-run)
+    await runner.query(GLOBAL_MEMORY_MIGRATION_SQL);
+    logger.database.info('Global memory migration applied successfully');
   } catch (err) {
     logger.database.error('Failed to ensure database schema:', (err as Error).message);
     throw err;

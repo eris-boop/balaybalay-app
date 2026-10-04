@@ -10,10 +10,10 @@
  * - Deduplicates via idempotency cache (message.key.id)
  * - In group chats (@g.us): requires bot mention (@s.whatsapp.net or @lid)
  * - In private chats (@s.whatsapp.net or @lid): responds directly without mention
- * - Rate limits per sender
  * - Cleans mention from prompt before calling Gemini
- * - Persists conversation history only upon successful Gemini generation
- * - Never saves fallback/error messages into conversation history
+ * - Saves user message to PostgreSQL BEFORE AI call (persists even if AI fails)
+ * - Saves assistant response AFTER AI succeeds (with profanity filtering applied)
+ * - Never saves fallback/error messages into conversation history as memory-eligible
  * - Sends reply via WhatsApp service to exact remoteJid
  */
 
@@ -105,7 +105,23 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
     return true;
   }
 
-  // 1. Retrieve previous conversation context (recent history, summary, relevant old messages)
+  // ──────── STEP 1: SAVE USER MESSAGE BEFORE AI ────────
+  // User message persists to PostgreSQL immediately, even if AI later fails.
+  try {
+    await memory.saveUserMsg({
+      chatId: message.chatId,
+      isGroup: Boolean(message.isGroup),
+      messageId: message.messageId,
+      senderId: message.senderId,
+      content: prompt,
+      sourceType: message.isGroup ? 'group' : 'private',
+    });
+  } catch (err) {
+    // Non-blocking: persistence failure should not prevent AI response
+    logger.memory.warn('[memory] user message persistence failed (non-blocking):', (err as Error).message);
+  }
+
+  // ──────── STEP 2: LOAD MEMORY CONTEXT ────────
   const context = await memory.loadContext(message.chatId, prompt);
   const history = context.recentHistory;
   logger.ai.info(`history entries=${history.length}`);
@@ -113,7 +129,7 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
   try {
     recordGeminiTimestamp();
 
-    // 2. Generate AI reply via Gemini with previous history + current prompt + context
+    // ──────── STEP 3: GENERATE AI REPLY ────────
     const reply = await generateReply({
       message: prompt,
       senderName: message.senderName,
@@ -121,9 +137,11 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       history,
       summary: context.summary,
       relevantOldMessages: context.relevantOldMessages,
+      globalRelevantMessages: context.globalRelevantMessages,
+      globalSummary: context.globalSummary,
     });
 
-    // 3. Filter profanity for assistant response before sending and storing
+    // ──────── STEP 4: PROFANITY FILTER ────────
     let filteredReply = reply;
     try {
       filteredReply = profanityFilter.mask(reply);
@@ -135,27 +153,42 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       filteredReply = reply;
     }
 
-    // 4. Save memory ONLY after generation succeeds (Transactional Memory)
+    // ──────── STEP 5: SAVE ASSISTANT RESPONSE AFTER SUCCESS ────────
     const aiMeta = getLastAIResult();
-    await memory.saveTurn({
-      chatId: message.chatId,
-      isGroup: Boolean(message.isGroup),
-      userMessageId: message.messageId,
-      senderId: message.senderId,
-      userPrompt: prompt,
-      assistantReply: filteredReply,
-      modelUsed: aiMeta.modelUsed,
-      taskType: aiMeta.taskType,
+    try {
+      await memory.saveAssistantMsg({
+        chatId: message.chatId,
+        isGroup: Boolean(message.isGroup),
+        content: filteredReply,
+        modelUsed: aiMeta.modelUsed,
+        taskType: aiMeta.taskType,
+        memoryEligible: true,
+      });
+    } catch (err) {
+      // Non-blocking
+      logger.memory.warn('[memory] assistant persistence failed (non-blocking):', (err as Error).message);
+    }
+
+    // Record successful turn in in-memory store for future turns in current session
+    memory.addEntry(message.chatId, {
+      role: 'user',
+      content: prompt,
+      timestamp: Date.now(),
+    });
+    memory.addEntry(message.chatId, {
+      role: 'assistant',
+      content: filteredReply,
+      timestamp: Date.now(),
     });
 
     logger.memory.info('transaction committed');
 
-    // 5. Send reply back to EXACT remoteJid
+    // ──────── STEP 6: SEND REPLY ────────
     await sendMessage(message.chatId, filteredReply);
     logger.whatsapp.info('reply sent');
     return true;
   } catch (err) {
-    logger.memory.warn('AI failed - history unchanged');
+    logger.memory.warn('AI failed - user message already persisted');
     const error = err as any;
     logger.error.error('Gemini processing failed, handled gracefully:', error?.message || String(error));
 
