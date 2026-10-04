@@ -45,6 +45,7 @@ describe('No Local Rate Limiting & High Throughput Verification', () => {
     memory.clearAll();
     idempotency.clear();
     (config as any).geminiFallbackModel = '';
+    (config as any).aiProvider = 'gemini';
   });
 
   // 1. 20 pesan unik dari user yang sama tidak diblok local limiter

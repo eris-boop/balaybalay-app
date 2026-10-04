@@ -66,6 +66,7 @@ function createLogger(prefix: string) {
 export const logger = {
   webhook: createLogger('WEBHOOK'),
   whatsapp: createLogger('WHATSAPP'),
+  ai: createLogger('AI'),
   gemini: createLogger('GEMINI'),
   error: createLogger('ERROR'),
   server: createLogger('SERVER'),

@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:gemini": "tsx scripts/test-gemini.ts"
+    "test:gemini": "tsx scripts/test-gemini.ts",
+    "test:ai": "tsx scripts/test-ai.ts"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -28,6 +29,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.1",
     "helmet": "^8.0.0",
+    "openai": "^7.27.0",
     "pino": "^10.4.0",
     "qrcode": "^1.5.4"
   },

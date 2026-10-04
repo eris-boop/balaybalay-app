@@ -79,7 +79,8 @@ const server = app.listen(config.port, '0.0.0.0', () => {
   logger.server.info(`Listening on 0.0.0.0:${config.port}`);
   logger.server.info(`Environment: ${config.nodeEnv}`);
   logger.server.info(`WhatsApp Provider: ${config.whatsappProvider}`);
-  logger.server.info(`Model: ${config.geminiModel}`);
+  logger.server.info(`AI Provider: ${config.aiProvider}`);
+  logger.server.info(`Primary AI Model: ${config.aiProvider === 'vpsmurah' ? (config.aiModelChain[0] || 'none') : config.geminiModel}`);
   logger.server.info(`Private chat responses: ${config.respondInPrivate ? 'enabled' : 'disabled'}`);
 
   // Initialize Baileys client if configured

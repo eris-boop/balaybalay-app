@@ -138,12 +138,13 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
     logger.error.error('Gemini processing failed, handled gracefully:', error?.message || String(error));
 
     // Determine fallback text based on provider error
-    let fallbackText = 'AI sedang mengalami gangguan sementara. Coba lagi ya.';
+    let fallbackText = 'AI sedang mengalami gangguan sementara. Coba lagi beberapa saat ya.';
     if (
-      (error instanceof GeminiProviderError && error.isRateLimit) ||
-      error?.isRateLimit ||
-      String(error?.message).includes('429') ||
-      String(error?.message).includes('RESOURCE_EXHAUSTED')
+      config.aiProvider === 'gemini' &&
+      ((error instanceof GeminiProviderError && error.isRateLimit) ||
+        error?.isRateLimit ||
+        String(error?.message).includes('429') ||
+        String(error?.message).includes('RESOURCE_EXHAUSTED'))
     ) {
       fallbackText = 'AI sedang ramai sebentar. Coba lagi beberapa saat ya.';
     }

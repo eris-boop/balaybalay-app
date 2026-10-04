@@ -7,6 +7,7 @@ import { Router, Request, Response } from 'express';
 import QRCode from 'qrcode';
 import { config } from '../config';
 import { getWhatsAppStatus, getLatestQr, getDiagnostics } from '../services/whatsappClient';
+import { getAIDiagnostics } from '../services/aiService';
 
 export const adminRouter = Router();
 
@@ -123,5 +124,9 @@ adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => 
  */
 adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
   const diag = getDiagnostics();
-  res.status(200).json(diag);
+  const aiDiag = getAIDiagnostics();
+  res.status(200).json({
+    ...diag,
+    ...aiDiag,
+  });
 });

@@ -8,6 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 import { config } from '../config';
 import { ConversationEntry } from '../types/whatsapp';
 import { logger } from '../utils/logger';
+import { generateReplyWithFailover } from './aiService';
 
 const genai = new GoogleGenAI({ apiKey: config.geminiApiKey });
 
@@ -209,9 +210,9 @@ async function executeModelCall(
 }
 
 /**
- * Generate a reply using Google Gemini.
+ * Direct Google Gemini API generation.
  */
-export async function generateReply(params: GenerateReplyParams): Promise<string> {
+export async function generateGeminiDirectReply(params: GenerateReplyParams): Promise<string> {
   const { message, senderName, chatId, history } = params;
 
   // Truncate input
@@ -332,4 +333,14 @@ export async function generateReply(params: GenerateReplyParams): Promise<string
       statusCode: parsed.status,
     });
   }
+}
+
+/**
+ * Unified reply generator delegating to configured provider.
+ */
+export async function generateReply(params: GenerateReplyParams): Promise<string> {
+  if (config.aiProvider === 'gemini') {
+    return generateGeminiDirectReply(params);
+  }
+  return generateReplyWithFailover(params);
 }

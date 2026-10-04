@@ -4,10 +4,11 @@
  */
 
 import dotenv from 'dotenv';
-
-dotenv.config({ override: true });
-
 import path from 'path';
+
+// Always resolve .env relative to current working directory explicitly
+dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true });
+
 
 function required(key: string, hint?: string): string {
   const value = process.env[key];
@@ -46,6 +47,32 @@ const defaultAuthDir = process.env.WHATSAPP_AUTH_DIR ||
     ? path.resolve(process.cwd(), 'data/wa-auth')
     : '/app/data/wa-auth');
 
+export function cleanApiKey(raw?: string | null): string {
+  let val = (raw || '').trim();
+  if (val.startsWith('Bearer ')) {
+    val = val.slice(7).trim();
+  }
+  return val;
+}
+
+export function getVpsmurahAiApiKey(): string {
+  if (process.env.VPSMURAH_AI_API_KEY !== undefined && process.env.VPSMURAH_AI_API_KEY !== null) {
+    return cleanApiKey(process.env.VPSMURAH_AI_API_KEY);
+  }
+  return cleanApiKey(config.vpsmurahAiApiKey);
+}
+
+function parseModelChain(raw: string): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0);
+}
+
+const DEFAULT_MODEL_CHAIN =
+  'gemini-38,gemini-37,gemini-36,gemini-35,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
+
 export const config = {
   port: optionalInt('PORT', 3000),
   nodeEnv: optional('NODE_ENV', 'development'),
@@ -59,8 +86,15 @@ export const config = {
   // Bot Identity (optional when using Baileys because JID is fetched from socket user)
   botWhatsappNumber: optional('BOT_WHATSAPP_NUMBER', ''),
 
-  // Google Gemini AI (Required: from Google AI Studio)
-  geminiApiKey: required('GEMINI_API_KEY', 'Must be obtained from Google AI Studio'),
+  // AI Provider & Settings
+  aiProvider: optional('AI_PROVIDER', 'vpsmurah').toLowerCase(),
+  vpsmurahAiBaseUrl: optional('VPSMURAH_AI_BASE_URL', 'https://my.vpsmurah.co.id/api/v1'),
+  vpsmurahAiApiKey: cleanApiKey(optional('VPSMURAH_AI_API_KEY', '')),
+  aiModelChain: parseModelChain(optional('AI_MODEL_CHAIN', DEFAULT_MODEL_CHAIN)),
+  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 12000),
+
+  // Google Gemini AI (Direct SDK fallback)
+  geminiApiKey: optional('GEMINI_API_KEY', ''),
   geminiModel: optional('GEMINI_MODEL', 'gemini-3.7-flash'),
   geminiFallbackModel: optional('GEMINI_FALLBACK_MODEL', ''),
   systemPrompt: optional('SYSTEM_PROMPT', '') || DEFAULT_SYSTEM_PROMPT,

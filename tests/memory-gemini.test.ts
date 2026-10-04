@@ -19,6 +19,7 @@ import { sanitizeGeminiHistory, generateReply } from '../src/services/gemini';
 import { processIncomingMessage } from '../src/services/messageProcessor';
 import { memory } from '../src/services/memory';
 import * as whatsappService from '../src/services/whatsapp';
+import { config } from '../src/config';
 
 const { mockGenerateContent } = vi.hoisted(() => {
   return {
@@ -44,6 +45,7 @@ describe('Gemini Conversation History & Memory Service', () => {
     vi.restoreAllMocks();
     mockGenerateContent.mockReset();
     memory.clearAll();
+    (config as any).aiProvider = 'gemini';
   });
 
   // --------------------------------------------------------------------------
@@ -285,7 +287,7 @@ describe('Gemini Conversation History & Memory Service', () => {
       // Fallback message sent to WhatsApp
       expect(sendSpy).toHaveBeenCalledWith(
         chatId,
-        'AI sedang mengalami gangguan sementara. Coba lagi ya.'
+        'AI sedang mengalami gangguan sementara. Coba lagi beberapa saat ya.'
       );
 
       // Memory must STILL have only the first 2 entries!
