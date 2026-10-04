@@ -27,7 +27,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getBotIdentifiers, recordGeminiTimestamp } from './whatsappClient';
 import { chatQueue } from '../utils/queue';
-import { filterProfanity } from './profanityFilter';
+import { profanityFilter, filterProfanity } from './profanityFilter';
 import { getLastAIResult } from './aiService';
 
 /**
@@ -57,6 +57,7 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
 
   if (idempotency.isDuplicate(dedupeKey)) {
     logger.whatsapp.info('message ignored reason=duplicate');
+    logger.memory.info('[memory] duplicate message skipped');
     return false;
   }
 
@@ -123,7 +124,16 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
     });
 
     // 3. Filter profanity for assistant response before sending and storing
-    const filteredReply = filterProfanity(reply);
+    let filteredReply = reply;
+    try {
+      filteredReply = profanityFilter.mask(reply);
+    } catch (profErr) {
+      logger.profanity.warn(
+        'Profanity filtering unexpectedly failed, falling back to raw response:',
+        (profErr as Error).message
+      );
+      filteredReply = reply;
+    }
 
     // 4. Save memory ONLY after generation succeeds (Transactional Memory)
     const aiMeta = getLastAIResult();

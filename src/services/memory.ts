@@ -10,7 +10,7 @@
 import { ConversationEntry } from '../types/whatsapp';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { isDatabaseConnected } from '../database/db';
+import { isDatabaseConnected, getDbPool } from '../database/db';
 import {
   loadConversationContext,
   saveSuccessfulTurn,
@@ -18,6 +18,7 @@ import {
   LoadedContext,
 } from '../database/memoryRepository';
 import { deleteConversation as dbDeleteConversation, deleteAllConversations as dbDeleteAll } from '../database/conversations';
+import { isFallbackOrErrorText } from './aiService';
 
 export interface MemoryStore {
   getHistory(chatId: string): ConversationEntry[];
@@ -27,6 +28,37 @@ export interface MemoryStore {
   loadContext(chatId: string, currentPrompt: string): Promise<LoadedContext>;
   saveTurn(params: SaveTurnParams): Promise<void>;
   deleteConversation(chatId: string): Promise<boolean>;
+}
+
+export interface MemoryDiagnostics {
+  lastMemoryLoadAt: string | null;
+  lastMemorySaveAt: string | null;
+  lastMemoryChatFound: boolean | null;
+  lastMemoryRecentCount: number;
+  lastMemoryRelevantCount: number;
+  lastMemorySummaryUsed: boolean;
+}
+
+const memoryDiagnostics: MemoryDiagnostics = {
+  lastMemoryLoadAt: null,
+  lastMemorySaveAt: null,
+  lastMemoryChatFound: null,
+  lastMemoryRecentCount: 0,
+  lastMemoryRelevantCount: 0,
+  lastMemorySummaryUsed: false,
+};
+
+export function getMemoryDiagnostics(): MemoryDiagnostics {
+  return { ...memoryDiagnostics };
+}
+
+export function resetMemoryDiagnostics(): void {
+  memoryDiagnostics.lastMemoryLoadAt = null;
+  memoryDiagnostics.lastMemorySaveAt = null;
+  memoryDiagnostics.lastMemoryChatFound = null;
+  memoryDiagnostics.lastMemoryRecentCount = 0;
+  memoryDiagnostics.lastMemoryRelevantCount = 0;
+  memoryDiagnostics.lastMemorySummaryUsed = false;
 }
 
 class HybridMemoryStore implements MemoryStore {
@@ -66,7 +98,7 @@ class HybridMemoryStore implements MemoryStore {
    */
   clearAll(): void {
     this.inMemoryStore.clear();
-    if (isDatabaseConnected()) {
+    if (getDbPool()) {
       dbDeleteAll().catch((err) => {
         logger.database.warn('Failed to clear database conversations:', (err as Error).message);
       });
@@ -81,25 +113,41 @@ class HybridMemoryStore implements MemoryStore {
    * Falls back to in-memory store if database is offline.
    */
   async loadContext(chatId: string, currentPrompt: string): Promise<LoadedContext> {
-    if (isDatabaseConnected()) {
+    const hasPool = Boolean(getDbPool());
+    let dbContext: LoadedContext | null = null;
+    let chatFound = false;
+
+    if (hasPool) {
       try {
-        const dbContext = await loadConversationContext(chatId, currentPrompt);
+        dbContext = await loadConversationContext(chatId, currentPrompt);
+        chatFound = dbContext.recentHistory.length > 0 || Boolean(dbContext.summary);
         // Sync in-memory cache with db's recent history
         if (dbContext.recentHistory.length > 0) {
           this.inMemoryStore.set(chatId, [...dbContext.recentHistory]);
         }
-        return dbContext;
       } catch (err) {
         logger.database.warn('[DATABASE] unavailable, falling back to in-memory context:', (err as Error).message);
       }
     }
 
-    // In-memory fallback
-    const memHistory = this.getHistory(chatId);
+    const recentHistory = dbContext ? dbContext.recentHistory : this.getHistory(chatId);
+    const summary = dbContext ? dbContext.summary : null;
+    const relevantOldMessages = dbContext ? dbContext.relevantOldMessages : [];
+
+    memoryDiagnostics.lastMemoryLoadAt = new Date().toISOString();
+    memoryDiagnostics.lastMemoryChatFound = hasPool ? chatFound : (this.inMemoryStore.has(chatId) ? true : null);
+    memoryDiagnostics.lastMemoryRecentCount = recentHistory.length;
+    memoryDiagnostics.lastMemoryRelevantCount = relevantOldMessages.length;
+    memoryDiagnostics.lastMemorySummaryUsed = Boolean(summary);
+
+    logger.memory.info(
+      `[memory] loaded recent=${recentHistory.length} relevant=${relevantOldMessages.length} summary=${Boolean(summary)}`
+    );
+
     return {
-      recentHistory: memHistory,
-      summary: null,
-      relevantOldMessages: [],
+      recentHistory,
+      summary,
+      relevantOldMessages,
     };
   }
 
@@ -108,6 +156,11 @@ class HybridMemoryStore implements MemoryStore {
    * persistent PostgreSQL storage and in-memory cache.
    */
   async saveTurn(params: SaveTurnParams): Promise<void> {
+    if (isFallbackOrErrorText(params.assistantReply)) {
+      logger.memory.warn('Attempted to save fallback/error reply, skipping save');
+      return;
+    }
+
     const now = Date.now();
 
     // 1. Update in-memory cache
@@ -123,14 +176,17 @@ class HybridMemoryStore implements MemoryStore {
       timestamp: now,
     });
 
-    // 2. Persist to PostgreSQL if connected
-    if (isDatabaseConnected()) {
+    // 2. Persist to PostgreSQL if database pool is available
+    if (getDbPool()) {
       try {
         await saveSuccessfulTurn(params);
       } catch (err) {
         logger.database.warn('[DATABASE] unavailable - turn saved to in-memory only:', (err as Error).message);
       }
     }
+
+    memoryDiagnostics.lastMemorySaveAt = new Date().toISOString();
+    logger.memory.info('[memory] saved conversation pair');
   }
 
   /**
@@ -139,7 +195,7 @@ class HybridMemoryStore implements MemoryStore {
   async deleteConversation(chatId: string): Promise<boolean> {
     this.clearHistory(chatId);
 
-    if (isDatabaseConnected()) {
+    if (getDbPool()) {
       try {
         return await dbDeleteConversation(chatId);
       } catch (err) {

@@ -253,17 +253,19 @@ export function detectTaskType(text: string): TaskType {
     }
   }
 
-  // 2. Coding Heuristic (code, programming languages, functions, classes, debug, web development)
+  // 2. Coding Heuristic (code, programming languages, functions, classes, debug, web development, calculator, scripts)
   const codingPatterns = [
     /```[\s\S]*?```/,
-    /\b(python|javascript|typescript|java|c\+\+|golang|rust|php|ruby|swift|kotlin|csharp|html|css|sql|bash|powershell)\b/i,
-    /\b(code|kode|coding|koding|programmer|program|pemrograman)\b/i,
-    /\b(debug|debugging|error|exception|stacktrace|syntax)\b/i,
-    /\b(function|fungsi|method|class|variable|regex|regexp)\b/i,
-    /\b(api|endpoint|rest\s*api|graphql|backend|frontend|fullstack|website|web\s*app)\b/i,
-    /\b(git|github|gitlab|docker|kubernetes|npm|yarn|pnpm|pip)\b/i,
-    /\b(react|vue|angular|svelte|nextjs|express|django|flask|laravel|spring)\b/i,
-    /\b(database|query|select\s+\*|insert\s+into|join)\b/i,
+    /\b(kalkulator|calculator)\b/i,
+    /\b(python|javascript|typescript|js|ts|java|c\+\+|cpp|golang|go|rust|php|ruby|swift|kotlin|csharp|c#|html|css|sql|bash|sh|powershell)\b/i,
+    /\b(code|kode|coding|koding|programmer|program|pemrograman|script|skrip|source\s*code)\b/i,
+    /\b(debug|debugging|error|exception|stacktrace|syntax|bug|refactor|compile|compiler)\b/i,
+    /\b(function|fungsi|method|metode|class|kelas|variable|variabel|regex|regexp|array|loop|looping|perulangan)\b/i,
+    /\b(api|endpoint|rest\s*api|graphql|backend|frontend|fullstack|website|web\s*app|framework|library)\b/i,
+    /\b(git|github|gitlab|docker|dockerfile|kubernetes|npm|yarn|pnpm|pip)\b/i,
+    /\b(react|vue|angular|svelte|nextjs|express|django|flask|laravel|spring|fastapi)\b/i,
+    /\b(database|query|select\s+\*|insert\s+into|join|mongodb|postgresql|postgres|mysql|sqlite|redis)\b/i,
+    /\b(buat|buatkan|bikin|tulis|tuliskan|create|build|make)\s+.*?\b(program|aplikasi|app|bot|game|fitur|feature|web|website|skrip|script|fungsi|function|kalkulator|calculator)\b/i,
   ];
 
   for (const pattern of codingPatterns) {
@@ -402,7 +404,7 @@ export function getModelChainsForTask(taskType: TaskType): {
       categoryChain =
         config.aiCodingChain.length > 0
           ? config.aiCodingChain
-          : ['gemini-38', 'gpt-53-codex', 'qwen3-coder', 'deepseek-coder', 'codestral', 'gpt-5-mini'];
+          : ['qwen3-coder', 'gemini-38', 'gpt-53-codex', 'deepseek-coder', 'codestral', 'gpt-5-mini'];
       break;
     case 'reasoning':
       categoryChain =
@@ -421,7 +423,7 @@ export function getModelChainsForTask(taskType: TaskType): {
       categoryChain =
         config.aiGeneralChain.length > 0
           ? config.aiGeneralChain
-          : ['gemini-38', 'gemini-37', 'gemini-36', 'qwen3-flash', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
+          : ['gemini-38', 'qwen3-flash', 'gemini-37', 'gemini-36', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
       break;
   }
 
@@ -480,9 +482,10 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
   const modelsToAttempt = healthyPlanned.length > 0 ? healthyPlanned : plannedModels;
 
   const overallStartTime = Date.now();
-  const totalTimeoutMs = config.aiTotalTimeoutMs || 10000;
+  const totalTimeoutMs = config.aiTotalTimeoutMs || 25000;
   let fallbackCount = 0;
   let switchedToEmergency = false;
+  const attemptedModels: string[] = [];
 
   for (let i = 0; i < modelsToAttempt.length; i++) {
     const { model, isEmergency } = modelsToAttempt[i];
@@ -501,16 +504,18 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       switchedToEmergency = true;
     }
 
-    const perModelTimeout = Math.min(config.aiModelTimeoutMs || 4000, remainingTotalMs);
+    const perModelTimeout = Math.min(config.aiModelTimeoutMs || 7000, remainingTotalMs);
     const modelStartTime = Date.now();
+    attemptedModels.push(model);
     logger.ai.info(`model=${model} start`);
+
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | null = null;
 
     try {
       const client = getOpenAIClient();
 
       // Enforce per-model timeout with AbortController and Promise.race
-      const controller = new AbortController();
-      let timer: NodeJS.Timeout | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           const timeoutErr: any = new Error(`Model ${model} timed out after ${perModelTimeout}ms`);
@@ -533,7 +538,10 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
           timeoutPromise,
         ]);
       } finally {
-        if (timer) clearTimeout(timer);
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
       }
 
       // Response validation
@@ -546,16 +554,22 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       }
 
       // Success!
-      const duration = Date.now() - modelStartTime;
-      logger.ai.info(`model=${model} success duration=${duration}ms`);
+      const modelDurationMs = Date.now() - modelStartTime;
+      const totalDurationMs = Date.now() - overallStartTime;
+      logger.ai.info(`model=${model} success duration=${modelDurationMs}ms`);
       logger.ai.info('reply generated');
 
       recordModelSuccess(model);
       lastTaskType = taskType;
       lastUsedModel = model;
-      lastAIDurationMs = Date.now() - overallStartTime;
+      lastAIDurationMs = totalDurationMs;
       lastFallbackCount = fallbackCount;
       lastAIStatus = 'success';
+
+      logger.ai.info(
+        `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=${model} modelDurationMs=${modelDurationMs} totalDurationMs=${totalDurationMs} fallbackCount=${fallbackCount} finalStatus=success`
+      );
+
       return content.trim();
     } catch (err: any) {
       fallbackCount++;
@@ -574,19 +588,27 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
 
       logger.ai.warn(`model=${model} failed status=${status}`);
 
-      // Non-retryable error check (401 invalid key, 403 forbidden, invalid config)
+      // Permanent request-validation errors (401 invalid key, 403 forbidden, invalid config)
       if (status === 401 || status === 403 || err.code === 'ERR_INVALID_URL') {
         logger.ai.error(`configuration/provider error status=${status} message=${sanitizedMsg}`);
         lastTaskType = taskType;
         lastAIDurationMs = Date.now() - overallStartTime;
         lastFallbackCount = fallbackCount;
         lastAIStatus = 'failed';
+        logger.ai.info(
+          `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=none modelDurationMs=${Date.now() - modelStartTime} totalDurationMs=${Date.now() - overallStartTime} fallbackCount=${fallbackCount} finalStatus=failed`
+        );
         throw err;
       }
 
       // If there is a next model to try in chain
       if (next) {
         logger.ai.info(`switching model=${next.model}`);
+      }
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
       }
     }
   }
@@ -612,14 +634,16 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       config.maxHistoryMessages
     );
 
-    const recoveryTimeout = Math.min(config.aiModelTimeoutMs || 4000, remainingTotalMs);
+    const recoveryTimeout = Math.min(config.aiModelTimeoutMs || 7000, remainingTotalMs);
     const recoveryStart = Date.now();
+    attemptedModels.push(recoveryModel);
     logger.ai.info(`model=${recoveryModel} start (recovery attempt)`);
+
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | null = null;
 
     try {
       const client = getOpenAIClient();
-      const controller = new AbortController();
-      let timer: NodeJS.Timeout | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           const timeoutErr: any = new Error(
@@ -642,7 +666,10 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
           timeoutPromise,
         ]);
       } finally {
-        if (timer) clearTimeout(timer);
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
       }
 
       const choice = completion?.choices && completion.choices[0];
@@ -650,6 +677,7 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       if (content && content.trim()) {
         const reply = content.trim();
         const duration = Date.now() - recoveryStart;
+        const totalDurationMs = Date.now() - overallStartTime;
         logger.ai.info('history-free recovery success');
         logger.ai.info(`model=${recoveryModel} success duration=${duration}ms`);
         logger.ai.info('reply generated');
@@ -657,14 +685,24 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
         recordModelSuccess(recoveryModel);
         lastTaskType = taskType;
         lastUsedModel = recoveryModel;
-        lastAIDurationMs = Date.now() - overallStartTime;
+        lastAIDurationMs = totalDurationMs;
         lastFallbackCount = fallbackCount + 1;
         lastAIStatus = 'success';
+
+        logger.ai.info(
+          `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=${recoveryModel} modelDurationMs=${duration} totalDurationMs=${totalDurationMs} fallbackCount=${fallbackCount + 1} finalStatus=success`
+        );
+
         return reply;
       }
     } catch (err: any) {
       logger.ai.warn('history-free recovery failed');
       recordModelFailure(recoveryModel, err.status || err.statusCode || 500);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
     }
   }
 
@@ -673,6 +711,9 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
   lastAIDurationMs = Date.now() - overallStartTime;
   lastFallbackCount = fallbackCount;
   lastAIStatus = 'failed';
+  logger.ai.info(
+    `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=none modelDurationMs=0 totalDurationMs=${Date.now() - overallStartTime} fallbackCount=${fallbackCount} finalStatus=failed`
+  );
   throw new Error('All AI models failed in failover chain');
 }
 

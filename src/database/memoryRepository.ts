@@ -10,7 +10,7 @@
  */
 
 import { PoolClient } from 'pg';
-import { getClient, query, isDatabaseConnected } from './db';
+import { getClient, query, isDatabaseConnected, getDbPool } from './db';
 import { getOrCreateConversation, getConversationByChatId, ConversationRow } from './conversations';
 import { ConversationEntry } from '../types/whatsapp';
 import { config } from '../config';
@@ -226,7 +226,7 @@ export async function loadConversationContext(
   chatId: string,
   currentPrompt: string
 ): Promise<LoadedContext> {
-  if (!isDatabaseConnected()) {
+  if (!getDbPool()) {
     return {
       recentHistory: [],
       summary: null,
@@ -329,6 +329,18 @@ export async function saveSuccessfulTurn(params: SaveTurnParams): Promise<void> 
     );
 
     // 2. Insert user message (with optional message_id unique check)
+    if (params.userMessageId) {
+      const existing = await client.query(
+        'SELECT id FROM messages WHERE message_id = $1 LIMIT 1;',
+        [params.userMessageId]
+      );
+      if (existing.rows.length > 0) {
+        logger.memory.info('[memory] duplicate message skipped');
+        await client.query('COMMIT');
+        return;
+      }
+    }
+
     const userInsertSql = `
       INSERT INTO messages (conversation_id, message_id, sender_id, role, content, created_at)
       VALUES ($1, $2, $3, 'user', $4, CURRENT_TIMESTAMP)

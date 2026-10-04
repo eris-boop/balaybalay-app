@@ -31,7 +31,7 @@ class ChatQueue {
         // Prior job failure or timeout does not block subsequent jobs
       }
 
-      const timeoutMs = config.chatJobTimeoutMs || 12000;
+      const timeoutMs = config.chatJobTimeoutMs || 30000;
       let timer: NodeJS.Timeout | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {

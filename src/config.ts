@@ -74,9 +74,9 @@ const DEFAULT_MODEL_CHAIN =
   'gemini-38,gemini-37,gemini-36,gemini-35,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
 
 const DEFAULT_GENERAL_CHAIN =
-  'gemini-38,gemini-37,gemini-36,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
+  'gemini-38,qwen3-flash,gemini-37,gemini-36,gpt-5-mini,gpt-4o-mini,mistral-small';
 const DEFAULT_CODING_CHAIN =
-  'gemini-38,gpt-53-codex,qwen3-coder,deepseek-coder,codestral,gpt-5-mini';
+  'qwen3-coder,gemini-38,gpt-53-codex,deepseek-coder,codestral,gpt-5-mini';
 const DEFAULT_REASONING_CHAIN =
   'gemini-38,gemini-37,qwen3-plus,deepseek-r1,kimi-k3,gpt-55';
 const DEFAULT_LONGFORM_CHAIN =
@@ -107,12 +107,12 @@ export const config = {
   aiReasoningChain: parseModelChain(optional('AI_REASONING_CHAIN', DEFAULT_REASONING_CHAIN)),
   aiLongformChain: parseModelChain(optional('AI_LONGFORM_CHAIN', DEFAULT_LONGFORM_CHAIN)),
   aiEmergencyChain: parseModelChain(optional('AI_EMERGENCY_CHAIN', DEFAULT_EMERGENCY_CHAIN)),
-  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 4000),
-  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 10000),
+  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 7000),
+  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 25000),
   aiDirectGeminiFallback: optionalBool('AI_DIRECT_GEMINI_FALLBACK', true),
   circuitBreakerFailures: optionalInt('CIRCUIT_BREAKER_FAILURES', 3),
   circuitBreakerCooldownMs: optionalInt('CIRCUIT_BREAKER_COOLDOWN_MS', 30000),
-  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 12000),
+  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 30000),
 
   // Google Gemini AI (Direct SDK fallback)
   geminiApiKey: optional('GEMINI_API_KEY', ''),

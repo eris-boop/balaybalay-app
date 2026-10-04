@@ -119,7 +119,7 @@ adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => 
 });
 
 import { isDatabaseConnected } from '../database/db';
-import { memory } from '../services/memory';
+import { memory, getMemoryDiagnostics } from '../services/memory';
 
 /**
  * GET /admin/status
@@ -129,6 +129,7 @@ adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
   const diag = getDiagnostics();
   const aiDiag = getAIDiagnostics();
   const dbConnected = isDatabaseConnected();
+  const memDiag = getMemoryDiagnostics();
 
   res.status(200).json({
     ...diag,
@@ -137,6 +138,12 @@ adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
     persistentMemory: dbConnected,
     memorySummaryEnabled: config.memorySummaryEnabled,
     memoryRetrievalEnabled: config.memoryRetrievalEnabled,
+    lastMemoryLoadAt: memDiag.lastMemoryLoadAt,
+    lastMemorySaveAt: memDiag.lastMemorySaveAt,
+    lastMemoryChatFound: memDiag.lastMemoryChatFound,
+    lastMemoryRecentCount: memDiag.lastMemoryRecentCount,
+    lastMemoryRelevantCount: memDiag.lastMemoryRelevantCount,
+    lastMemorySummaryUsed: memDiag.lastMemorySummaryUsed,
   });
 });
 

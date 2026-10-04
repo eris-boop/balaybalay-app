@@ -59,17 +59,17 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     (config as any).aiProvider = 'vpsmurah';
     (config as any).aiGeneralChain = [
       'gemini-38',
+      'qwen3-flash',
       'gemini-37',
       'gemini-36',
-      'qwen3-flash',
       'gpt-5-mini',
       'gpt-4o-mini',
       'mistral-small',
     ];
     (config as any).aiCodingChain = [
+      'qwen3-coder',
       'gemini-38',
       'gpt-53-codex',
-      'qwen3-coder',
       'deepseek-coder',
       'codestral',
       'gpt-5-mini',
@@ -171,14 +171,14 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
 
     expect(reply).toBe('print("Halo")');
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
+    expect(mockCreate.mock.calls[0][0].model).toBe('qwen3-coder');
   });
 
-  // 7. coding fallback ke gpt-53-codex
-  it('7. coding task falls back to gpt-53-codex when gemini-38 fails', async () => {
-    // gemini-38 fails with 429
+  // 7. coding fallback ke gemini-38
+  it('7. coding task falls back to gemini-38 when qwen3-coder fails', async () => {
+    // qwen3-coder fails with 429
     mockCreate.mockRejectedValueOnce({ status: 429, message: 'Rate limit' });
-    // gpt-53-codex succeeds
+    // gemini-38 succeeds
     mockCreate.mockResolvedValueOnce({
       choices: [{ message: { content: 'def add(a, b): return a + b' } }],
     });
@@ -191,12 +191,12 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
 
     expect(reply).toBe('def add(a, b): return a + b');
     expect(mockCreate).toHaveBeenCalledTimes(2);
-    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
-    expect(mockCreate.mock.calls[1][0].model).toBe('gpt-53-codex');
+    expect(mockCreate.mock.calls[0][0].model).toBe('qwen3-coder');
+    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-38');
 
     const diag = getAIDiagnostics();
     expect(diag.lastTaskType).toBe('coding');
-    expect(diag.lastUsedModel).toBe('gpt-53-codex');
+    expect(diag.lastUsedModel).toBe('gemini-38');
     expect(diag.lastFallbackCount).toBe(1);
   });
 
@@ -262,7 +262,7 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
 
     expect(reply).toBe('Berhasil di model kedua');
     expect(mockCreate).toHaveBeenCalledTimes(2);
-    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
+    expect(mockCreate.mock.calls[1][0].model).toBe('qwen3-flash');
   });
 
   // 11. timeout langsung next model
@@ -275,7 +275,7 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     );
     // Second model responds quickly
     mockCreate.mockResolvedValueOnce({
-      choices: [{ message: { content: 'Cepat dari gemini-37' } }],
+      choices: [{ message: { content: 'Cepat dari qwen3-flash' } }],
     });
 
     const reply = await generateReply({
@@ -284,9 +284,9 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
       history: [],
     });
 
-    expect(reply).toBe('Cepat dari gemini-37');
+    expect(reply).toBe('Cepat dari qwen3-flash');
     expect(mockCreate).toHaveBeenCalledTimes(2);
-    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
+    expect(mockCreate.mock.calls[1][0].model).toBe('qwen3-flash');
   });
 
   // 12. tidak ada artificial delay
@@ -709,7 +709,7 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     expect(isModelHealthy('gemini-38')).toBe(false);
 
     mockCreate.mockResolvedValueOnce({
-      choices: [{ message: { content: 'Jawaban dari gemini-37' } }],
+      choices: [{ message: { content: 'Jawaban dari qwen3-flash' } }],
     });
 
     const reply = await generateReply({
@@ -718,9 +718,9 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
       history: [],
     });
 
-    expect(reply).toBe('Jawaban dari gemini-37');
+    expect(reply).toBe('Jawaban dari qwen3-flash');
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-37');
+    expect(mockCreate.mock.calls[0][0].model).toBe('qwen3-flash');
   });
 
   // 28. cooldown recovery works

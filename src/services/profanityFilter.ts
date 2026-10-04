@@ -178,3 +178,10 @@ export function filterProfanity(text: string): string {
     return text;
   }
 }
+
+export const profanityFilter = {
+  mask: filterProfanity,
+  filterProfanity,
+  maskWord,
+  getProfanityList,
+};

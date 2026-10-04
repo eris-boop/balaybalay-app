@@ -249,6 +249,13 @@ function createMockPostgresPool(): { pool: Pool; client: PoolClient; data: any }
       return { rows: msgs, rowCount: msgs.length };
     }
 
+    // SELECT id FROM messages WHERE message_id = $1
+    if (cleanSql.includes('FROM messages WHERE message_id = $1')) {
+      const msgId = params[0];
+      const found = data.messages.filter((m) => m.message_id === msgId);
+      return { rows: found, rowCount: found.length };
+    }
+
     // SELECT messages with Full-Text Search
     if (cleanSql.includes('to_tsvector') && cleanSql.includes('messages')) {
       const convId = params[0];
