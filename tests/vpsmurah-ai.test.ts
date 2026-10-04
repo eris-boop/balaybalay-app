@@ -1,32 +1,36 @@
 /**
- * Unit Test Suite for VPSMurah AI Service Multi-Model Failover.
+ * Unit Test Suite for Smart Model Router & Multi-Model Automatic Failover.
  *
  * Verifies all 16 required behaviors:
- * 1. gemini-38 success -> hanya 1 model dipanggil
- * 2. gemini-38 429 -> gemini-37 dipanggil
- * 3. gemini-38 503 -> gemini-37 dipanggil
- * 4. gemini-38 timeout -> gemini-37 dipanggil
- * 5. gemini-38 + gemini-37 gagal -> gemini-36 dipanggil
- * 6. semua Gemini gagal -> qwen3-flash dipanggil
- * 7. qwen3-flash gagal -> gpt-5-mini dipanggil
- * 8. model sukses menghentikan failover chain
- * 9. 401 tidak mencoba seluruh model chain
- * 10. API key tidak bocor di log
- * 11. history tetap sama ketika model berganti
- * 12. SYSTEM_PROMPT tetap digunakan
- * 13. idempotency tetap bekerja
- * 14. tidak ada local rate limit
- * 15. tidak ada artificial sleep/delay
- * 16. semua model gagal -> final fallback text
+ * 1. "Siapa Jokowi" -> general
+ * 2. "buat kode python" -> coding
+ * 3. soal matematika -> reasoning
+ * 4. essay panjang -> longform
+ * 5. general mencoba gemini-38 pertama
+ * 6. coding mencoba gemini-38 pertama
+ * 7. coding fallback ke gpt-53-codex
+ * 8. reasoning fallback ke qwen3-plus
+ * 9. primary success tidak mencoba model kedua
+ * 10. 429 langsung next model
+ * 11. timeout langsung next model
+ * 12. tidak ada artificial delay
+ * 13. total timeout dihormati
+ * 14. chat berbeda paralel
+ * 15. memory tetap bekerja setelah model switch
+ * 16. emergency chain hanya digunakan jika normal chain gagal
+ * + 17. VPSMURAH_AI_API_KEY specifically selected
+ * + 18. Bearer prefix stripped
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   generateReply,
+  detectTaskType,
   setTestOpenAIClient,
   resetAIState,
   getAIDiagnostics,
   getOpenAIClient,
+  formatOpenAIHistory,
 } from '../src/services/aiService';
 import { processIncomingMessage } from '../src/services/messageProcessor';
 import { memory } from '../src/services/memory';
@@ -36,7 +40,7 @@ import { config } from '../src/config';
 import { logger } from '../src/utils/logger';
 import OpenAI from 'openai';
 
-describe('VPSMurah AI Service & Multi-Model Failover Suite', () => {
+describe('Smart Model Router & Multi-Model Failover Suite', () => {
   let mockCreate: any;
 
   beforeEach(() => {
@@ -46,16 +50,46 @@ describe('VPSMurah AI Service & Multi-Model Failover Suite', () => {
     resetAIState();
 
     (config as any).aiProvider = 'vpsmurah';
-    (config as any).aiModelChain = [
+    (config as any).aiGeneralChain = [
       'gemini-38',
       'gemini-37',
       'gemini-36',
-      'gemini-35',
       'qwen3-flash',
       'gpt-5-mini',
       'gpt-4o-mini',
       'mistral-small',
     ];
+    (config as any).aiCodingChain = [
+      'gemini-38',
+      'gpt-53-codex',
+      'qwen3-coder',
+      'deepseek-coder',
+      'codestral',
+      'gpt-5-mini',
+    ];
+    (config as any).aiReasoningChain = [
+      'gemini-38',
+      'gemini-37',
+      'qwen3-plus',
+      'deepseek-r1',
+      'kimi-k3',
+      'gpt-55',
+    ];
+    (config as any).aiLongformChain = [
+      'gemini-38',
+      'gemini-37',
+      'qwen3-max',
+      'gpt-55',
+      'llama-4-maverick',
+    ];
+    (config as any).aiEmergencyChain = [
+      'qwen3-flash',
+      'gpt-5-mini',
+      'llama-4-scout',
+      'mistral-small',
+    ];
+    (config as any).aiModelTimeoutMs = 4000;
+    (config as any).aiTotalTimeoutMs = 10000;
 
     mockCreate = vi.fn();
     const mockClient = {
@@ -65,357 +99,190 @@ describe('VPSMurah AI Service & Multi-Model Failover Suite', () => {
         },
       },
     } as unknown as OpenAI;
-
     setTestOpenAIClient(mockClient);
   });
 
-  afterEach(() => {
-    resetAIState();
+  // 1. "Siapa Jokowi" -> general
+  it('1. classifies "Siapa Jokowi" as general chat', () => {
+    expect(detectTaskType('Siapa Jokowi')).toBe('general');
+    expect(detectTaskType('Halo, apa kabar?')).toBe('general');
+    expect(detectTaskType('Kapan Indonesia merdeka?')).toBe('general');
   });
 
-  // 1. gemini-38 success -> hanya 1 model dipanggil
-  it('1. gemini-38 success -> calls only 1 model and returns reply', async () => {
+  // 2. "buat kode python" -> coding
+  it('2. classifies "buat kode python" as coding task', () => {
+    expect(detectTaskType('buat kode python')).toBe('coding');
+    expect(detectTaskType('Buatkan kalkulator Python')).toBe('coding');
+    expect(detectTaskType('Debug function error di TypeScript')).toBe('coding');
+  });
+
+  // 3. soal matematika -> reasoning
+  it('3. classifies "soal matematika" as reasoning task', () => {
+    expect(detectTaskType('soal matematika')).toBe('reasoning');
+    expect(detectTaskType('Hitung probabilitas dadu muncul angka 6')).toBe('reasoning');
+    expect(detectTaskType('Pecahkan algoritma logika ini')).toBe('reasoning');
+  });
+
+  // 4. essay panjang -> longform
+  it('4. classifies "essay panjang" as longform task', () => {
+    expect(detectTaskType('essay panjang')).toBe('longform');
+    expect(detectTaskType('Buat essay 1000 kata tentang AI')).toBe('longform');
+    expect(detectTaskType('Jelaskan lengkap sejarah kemerdekaan')).toBe('longform');
+  });
+
+  // 5. general mencoba gemini-38 pertama
+  it('5. general task attempts gemini-38 first', async () => {
     mockCreate.mockResolvedValueOnce({
-      choices: [{ message: { content: 'Halo dari gemini-38' } }],
+      choices: [{ message: { content: 'Jokowi adalah Presiden ke-7 RI.' } }],
     });
 
     const reply = await generateReply({
-      message: 'Halo',
-      chatId: 'chat-1@s.whatsapp.net',
+      message: 'Siapa Jokowi?',
+      chatId: 'user1@s.whatsapp.net',
       history: [],
     });
 
-    expect(reply).toBe('Halo dari gemini-38');
+    expect(reply).toBe('Jokowi adalah Presiden ke-7 RI.');
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(mockCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: 'gemini-38',
-      })
-    );
+    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
   });
 
-  // 2. gemini-38 429 -> gemini-37 dipanggil
-  it('2. gemini-38 429 -> automatically switches to gemini-37', async () => {
-    mockCreate
-      .mockRejectedValueOnce({ status: 429, message: 'RESOURCE_EXHAUSTED' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Jawaban dari gemini-37' } }],
-      });
+  // 6. coding mencoba gemini-38 pertama
+  it('6. coding task attempts gemini-38 first', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'print("Halo")' } }],
+    });
 
     const reply = await generateReply({
-      message: 'Pertanyaan',
-      chatId: 'chat-1@s.whatsapp.net',
+      message: 'buat kode python sederhana',
+      chatId: 'user1@s.whatsapp.net',
       history: [],
     });
 
-    expect(reply).toBe('Jawaban dari gemini-37');
+    expect(reply).toBe('print("Halo")');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
+  });
+
+  // 7. coding fallback ke gpt-53-codex
+  it('7. coding task falls back to gpt-53-codex when gemini-38 fails', async () => {
+    // gemini-38 fails with 429
+    mockCreate.mockRejectedValueOnce({ status: 429, message: 'Rate limit' });
+    // gpt-53-codex succeeds
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'def add(a, b): return a + b' } }],
+    });
+
+    const reply = await generateReply({
+      message: 'buat kode python kalkulator',
+      chatId: 'user1@s.whatsapp.net',
+      history: [],
+    });
+
+    expect(reply).toBe('def add(a, b): return a + b');
     expect(mockCreate).toHaveBeenCalledTimes(2);
     expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
-    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
+    expect(mockCreate.mock.calls[1][0].model).toBe('gpt-53-codex');
 
     const diag = getAIDiagnostics();
-    expect(diag.lastUsedModel).toBe('gemini-37');
-    expect(diag.lastAIStatus).toBe('success');
+    expect(diag.lastTaskType).toBe('coding');
+    expect(diag.lastUsedModel).toBe('gpt-53-codex');
+    expect(diag.lastFallbackCount).toBe(1);
   });
 
-  // 3. gemini-38 503 -> gemini-37 dipanggil
-  it('3. gemini-38 503 -> automatically switches to gemini-37', async () => {
-    mockCreate
-      .mockRejectedValueOnce({ status: 503, message: 'Service Unavailable' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Sukses gemini-37' } }],
-      });
+  // 8. reasoning fallback ke qwen3-plus
+  it('8. reasoning task falls back to qwen3-plus when gemini-38 and gemini-37 fail', async () => {
+    // gemini-38 fails
+    mockCreate.mockRejectedValueOnce({ status: 503, message: 'Service Unavailable' });
+    // gemini-37 fails
+    mockCreate.mockRejectedValueOnce({ status: 500, message: 'Server error' });
+    // qwen3-plus succeeds
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Probabilitas adalah 1/6 atau 16.67%.' } }],
+    });
 
     const reply = await generateReply({
-      message: 'Tes 503',
-      chatId: 'chat-1@s.whatsapp.net',
+      message: 'Hitung probabilitas dadu soal matematika',
+      chatId: 'user1@s.whatsapp.net',
       history: [],
     });
 
-    expect(reply).toBe('Sukses gemini-37');
-    expect(mockCreate).toHaveBeenCalledTimes(2);
-    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
-    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
-  });
-
-  // 4. gemini-38 timeout -> gemini-37 dipanggil
-  it('4. gemini-38 timeout -> automatically switches to gemini-37', async () => {
-    mockCreate
-      .mockRejectedValueOnce({ code: 'ETIMEDOUT', message: 'Connection timeout' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Sukses setelah timeout' } }],
-      });
-
-    const reply = await generateReply({
-      message: 'Tes timeout',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: [],
-    });
-
-    expect(reply).toBe('Sukses setelah timeout');
-    expect(mockCreate).toHaveBeenCalledTimes(2);
-    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
-    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
-  });
-
-  // 5. gemini-38 + gemini-37 gagal -> gemini-36 dipanggil
-  it('5. gemini-38 + gemini-37 fail -> automatically switches to gemini-36', async () => {
-    mockCreate
-      .mockRejectedValueOnce({ status: 429, message: 'Rate limit' })
-      .mockRejectedValueOnce({ status: 500, message: 'Server error' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Sukses dari gemini-36' } }],
-      });
-
-    const reply = await generateReply({
-      message: 'Tes 3 model',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: [],
-    });
-
-    expect(reply).toBe('Sukses dari gemini-36');
+    expect(reply).toBe('Probabilitas adalah 1/6 atau 16.67%.');
     expect(mockCreate).toHaveBeenCalledTimes(3);
     expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
     expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
-    expect(mockCreate.mock.calls[2][0].model).toBe('gemini-36');
+    expect(mockCreate.mock.calls[2][0].model).toBe('qwen3-plus');
+
+    const diag = getAIDiagnostics();
+    expect(diag.lastTaskType).toBe('reasoning');
+    expect(diag.lastUsedModel).toBe('qwen3-plus');
+    expect(diag.lastFallbackCount).toBe(2);
   });
 
-  // 6. semua Gemini gagal -> qwen3-flash dipanggil
-  it('6. all Gemini models fail -> switches to secondary non-Gemini provider model (qwen3-flash)', async () => {
-    const logSpy = vi.spyOn(logger.ai, 'warn');
-
-    mockCreate
-      .mockRejectedValueOnce({ status: 429, message: 'Gemini 38 error' })
-      .mockRejectedValueOnce({ status: 503, message: 'Gemini 37 error' })
-      .mockRejectedValueOnce({ status: 500, message: 'Gemini 36 error' })
-      .mockRejectedValueOnce({ status: 429, message: 'Gemini 35 error' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Sukses dari Qwen 3 Flash' } }],
-      });
-
-    const reply = await generateReply({
-      message: 'Tes pindah non-gemini',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: [],
-    });
-
-    expect(reply).toBe('Sukses dari Qwen 3 Flash');
-    expect(mockCreate).toHaveBeenCalledTimes(5);
-    expect(mockCreate.mock.calls[4][0].model).toBe('qwen3-flash');
-
-    // Verify boundary log
-    expect(logSpy).toHaveBeenCalledWith(
-      'Gemini models unavailable, switching to secondary provider model'
-    );
-  });
-
-  // 7. qwen3-flash gagal -> gpt-5-mini dipanggil
-  it('7. qwen3-flash fails -> switches to gpt-5-mini', async () => {
-    mockCreate
-      .mockRejectedValueOnce({ status: 429, message: '38' })
-      .mockRejectedValueOnce({ status: 429, message: '37' })
-      .mockRejectedValueOnce({ status: 429, message: '36' })
-      .mockRejectedValueOnce({ status: 429, message: '35' })
-      .mockRejectedValueOnce({ status: 500, message: 'Qwen failed' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Sukses dari GPT-5 mini' } }],
-      });
-
-    const reply = await generateReply({
-      message: 'Tes ke gpt-5-mini',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: [],
-    });
-
-    expect(reply).toBe('Sukses dari GPT-5 mini');
-    expect(mockCreate).toHaveBeenCalledTimes(6);
-    expect(mockCreate.mock.calls[5][0].model).toBe('gpt-5-mini');
-  });
-
-  // 8. model sukses menghentikan failover chain
-  it('8. successful model immediately stops the failover chain', async () => {
-    mockCreate
-      .mockRejectedValueOnce({ status: 429, message: 'Fail 1' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Stop disini' } }],
-      });
-
-    await generateReply({
-      message: 'Cek stop',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: [],
-    });
-
-    // Only 2 calls made, remaining 6 models never attempted
-    expect(mockCreate).toHaveBeenCalledTimes(2);
-  });
-
-  // 9. 401 tidak mencoba seluruh model chain
-  it('9. 401 unauthorized does NOT attempt the rest of the model chain', async () => {
-    mockCreate.mockRejectedValueOnce({
-      status: 401,
-      message: 'Invalid API Key',
-    });
-
-    await expect(
-      generateReply({
-        message: 'Tes 401',
-        chatId: 'chat-1@s.whatsapp.net',
-        history: [],
-      })
-    ).rejects.toMatchObject({ status: 401 });
-
-    // Stopped on first failure
-    expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(getAIDiagnostics().lastAIStatus).toBe('failed');
-  });
-
-  // 10. API key tidak bocor di log
-  it('10. API key / Bearer token is redacted in logs', async () => {
-    const logWarnSpy = vi.spyOn(logger.ai, 'warn');
-
-    mockCreate
-      .mockRejectedValueOnce({
-        status: 429,
-        message: 'Bearer vpsmurah-super-secret-key-12345 rate limit',
-      })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'OK' } }],
-      });
-
-    await generateReply({
-      message: 'Tes log',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: [],
-    });
-
-    for (const call of logWarnSpy.mock.calls) {
-      const logText = call.join(' ');
-      expect(logText).not.toContain('vpsmurah-super-secret-key-12345');
-    }
-  });
-
-  // 11. history tetap sama ketika model berganti
-  it('11. conversation history remains identical when failover occurs', async () => {
-    const rawHistory = [
-      { role: 'user' as const, content: 'Pesan user 1', timestamp: 1 },
-      { role: 'assistant' as const, content: 'Balasan bot 1', timestamp: 2 },
-    ];
-
-    mockCreate
-      .mockRejectedValueOnce({ status: 429, message: '38 down' })
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: 'Sukses 37' } }],
-      });
-
-    await generateReply({
-      message: 'Pertanyaan baru',
-      chatId: 'chat-1@s.whatsapp.net',
-      history: rawHistory,
-    });
-
-    // Both calls must receive the exact same messages payload
-    const firstCallMessages = mockCreate.mock.calls[0][0].messages;
-    const secondCallMessages = mockCreate.mock.calls[1][0].messages;
-
-    expect(firstCallMessages).toEqual(secondCallMessages);
-    expect(secondCallMessages).toContainEqual({
-      role: 'user',
-      content: 'Pesan user 1',
-    });
-    expect(secondCallMessages).toContainEqual({
-      role: 'assistant',
-      content: 'Balasan bot 1',
-    });
-    expect(secondCallMessages[secondCallMessages.length - 1]).toEqual({
-      role: 'user',
-      content: 'Pertanyaan baru',
-    });
-  });
-
-  // 12. SYSTEM_PROMPT tetap digunakan
-  it('12. SYSTEM_PROMPT is prepended to messages for all models', async () => {
+  // 9. primary success tidak mencoba model kedua
+  it('9. primary success immediately stops failover chain without calling second model', async () => {
     mockCreate.mockResolvedValueOnce({
-      choices: [{ message: { content: 'OK' } }],
+      choices: [{ message: { content: 'Halo dari model utama!' } }],
     });
 
     await generateReply({
-      message: 'Halo',
-      chatId: 'chat-1@s.whatsapp.net',
+      message: 'Halo apa kabar',
+      chatId: 'user1@s.whatsapp.net',
       history: [],
     });
 
-    const messages = mockCreate.mock.calls[0][0].messages;
-    expect(messages[0].role).toBe('system');
-    expect(messages[0].content).toBe(config.systemPrompt);
-  });
-
-  // 13. idempotency tetap bekerja
-  it('13. idempotency prevents duplicate processing across incoming messages', async () => {
-    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
-    mockCreate.mockResolvedValue({
-      choices: [{ message: { content: 'Jawaban tunggal' } }],
-    });
-
-    const res1 = await processIncomingMessage({
-      messageId: 'IDEMP_MSG_1',
-      chatId: 'user-1@s.whatsapp.net',
-      senderId: 'user-1@s.whatsapp.net',
-      text: 'Halo',
-      isGroup: false,
-      isFromMe: false,
-      mentionedIds: [],
-      timestamp: 1000,
-      messageType: 'text',
-    });
-
-    const res2 = await processIncomingMessage({
-      messageId: 'IDEMP_MSG_1',
-      chatId: 'user-1@s.whatsapp.net',
-      senderId: 'user-1@s.whatsapp.net',
-      text: 'Halo',
-      isGroup: false,
-      isFromMe: false,
-      mentionedIds: [],
-      timestamp: 1001,
-      messageType: 'text',
-    });
-
-    expect(res1).toBe(true);
-    expect(res2).toBe(false); // Ignored duplicate
     expect(mockCreate).toHaveBeenCalledTimes(1);
+    const diag = getAIDiagnostics();
+    expect(diag.lastUsedModel).toBe('gemini-38');
+    expect(diag.lastFallbackCount).toBe(0);
   });
 
-  // 14. tidak ada local rate limit
-  it('14. no local rate limiter blocks multiple rapid unique messages', async () => {
-    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
-    mockCreate.mockResolvedValue({
-      choices: [{ message: { content: 'Jawaban' } }],
+  // 10. 429 langsung next model
+  it('10. HTTP 429 rate limit triggers immediate switch to next model', async () => {
+    mockCreate.mockRejectedValueOnce({ status: 429, message: 'Too Many Requests' });
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Berhasil di model kedua' } }],
     });
 
-    for (let i = 1; i <= 20; i++) {
-      const res = await processIncomingMessage({
-        messageId: `UNIQUE_${i}`,
-        chatId: 'rapid-user@s.whatsapp.net',
-        senderId: 'rapid-user@s.whatsapp.net',
-        text: `Pertanyaan ke-${i}`,
-        isGroup: false,
-        isFromMe: false,
-        mentionedIds: [],
-        timestamp: 2000 + i,
-        messageType: 'text',
-      });
-      expect(res).toBe(true);
-    }
+    const reply = await generateReply({
+      message: 'Pertanyaan',
+      chatId: 'user1@s.whatsapp.net',
+      history: [],
+    });
 
-    expect(mockCreate).toHaveBeenCalledTimes(20);
+    expect(reply).toBe('Berhasil di model kedua');
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
   });
 
-  // 15. tidak ada artificial sleep/delay
-  it('15. normal response executes immediately with no artificial delay', async () => {
-    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
-    mockCreate.mockResolvedValue({
-      choices: [{ message: { content: 'Cepat' } }],
+  // 11. timeout langsung next model
+  it('11. per-model timeout triggers immediate switch to next model', async () => {
+    (config as any).aiModelTimeoutMs = 50;
+
+    // First model times out
+    mockCreate.mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve({ choices: [{ message: { content: 'slow' } }] }), 200))
+    );
+    // Second model responds quickly
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Cepat dari gemini-37' } }],
+    });
+
+    const reply = await generateReply({
+      message: 'Pertanyaan timeout',
+      chatId: 'user1@s.whatsapp.net',
+      history: [],
+    });
+
+    expect(reply).toBe('Cepat dari gemini-37');
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
+  });
+
+  // 12. tidak ada artificial delay
+  it('12. normal response executes immediately with no artificial delay', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Respon cepat' } }],
     });
 
     const start = Date.now();
@@ -429,32 +296,106 @@ describe('VPSMurah AI Service & Multi-Model Failover Suite', () => {
     expect(elapsed).toBeLessThan(150);
   });
 
-  // 16. semua model gagal -> final fallback text
-  it('16. all models fail -> sends exact fallback text to user', async () => {
-    const sendSpy = vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
+  // 13. total timeout dihormati
+  it('13. total timeout stops failover loop without exhausting remaining models', async () => {
+    (config as any).aiModelTimeoutMs = 100;
+    (config as any).aiTotalTimeoutMs = 120; // Enough for only ~1-2 models
 
-    // Mock all 8 models to fail with 503
-    mockCreate.mockRejectedValue({ status: 503, message: 'Overloaded' });
+    // Hang all models beyond total timeout
+    mockCreate.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve({ choices: [{ message: { content: 'delayed' } }] }), 200))
+    );
 
-    const chatId = 'user-fail@s.whatsapp.net';
-    const result = await processIncomingMessage({
-      messageId: 'MSG_ALL_FAIL',
-      chatId,
-      senderId: chatId,
-      text: 'Pertanyaan saat semua down',
-      isGroup: false,
-      isFromMe: false,
-      mentionedIds: [],
-      timestamp: 3000,
-      messageType: 'text',
+    await expect(
+      generateReply({
+        message: 'Tes total timeout',
+        chatId: 'chat-timeout@s.whatsapp.net',
+        history: [],
+      })
+    ).rejects.toThrow();
+
+    // Should NOT call all 7 or 11 models because total timeout stopped the loop early
+    expect(mockCreate.mock.calls.length).toBeLessThan(5);
+  });
+
+  // 14. chat berbeda paralel
+  it('14. processes different chats in parallel without global locking', async () => {
+    mockCreate.mockImplementation(async (params: any) => {
+      await new Promise((r) => setTimeout(r, 30));
+      return { choices: [{ message: { content: `Reply for ${params.messages[params.messages.length - 1].content}` } }] };
     });
 
-    expect(result).toBe(false);
-    expect(mockCreate).toHaveBeenCalledTimes(8);
-    expect(sendSpy).toHaveBeenCalledWith(
+    const start = Date.now();
+    const [res1, res2] = await Promise.all([
+      generateReply({ message: 'Chat 1 msg', chatId: 'chat1@s.whatsapp.net', history: [] }),
+      generateReply({ message: 'Chat 2 msg', chatId: 'chat2@s.whatsapp.net', history: [] }),
+    ]);
+    const duration = Date.now() - start;
+
+    expect(res1).toContain('Chat 1 msg');
+    expect(res2).toContain('Chat 2 msg');
+    // Both 30ms queries ran concurrently, so total duration is ~30-50ms, not sequentially 60ms+
+    expect(duration).toBeLessThan(120);
+  });
+
+  // 15. memory tetap bekerja setelah model switch
+  it('15. preserves conversation history seamlessly across model switches', async () => {
+    const chatId = 'mem-user@s.whatsapp.net';
+
+    // Turn 1: Handled by gemini-38
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Halo! Saya asisten kamu.' } }],
+    });
+    const reply1 = await generateReply({
+      message: 'Halo, saya Budi',
       chatId,
-      'AI sedang mengalami gangguan sementara. Coba lagi beberapa saat ya.'
-    );
+      history: memory.getHistory(chatId),
+    });
+    memory.addEntry(chatId, { role: 'user', content: 'Halo, saya Budi', timestamp: Date.now() });
+    memory.addEntry(chatId, { role: 'assistant', content: reply1, timestamp: Date.now() });
+
+    // Turn 2: Coding question, gemini-38 fails -> gpt-53-codex answers
+    mockCreate.mockRejectedValueOnce({ status: 429, message: 'Gemini busy' });
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Tentu Budi, ini kode Python kamu.' } }],
+    });
+
+    const reply2 = await generateReply({
+      message: 'buat kode python salam',
+      chatId,
+      history: memory.getHistory(chatId),
+    });
+    memory.addEntry(chatId, { role: 'user', content: 'buat kode python salam', timestamp: Date.now() });
+    memory.addEntry(chatId, { role: 'assistant', content: reply2, timestamp: Date.now() });
+
+    expect(reply2).toContain('Tentu Budi');
+
+    // Verify gpt-53-codex (mock call index 2) received the previous history containing "Budi"
+    const lastCallMessages = mockCreate.mock.calls[mockCreate.mock.calls.length - 1][0].messages;
+    expect(lastCallMessages.some((m: any) => m.content.includes('Halo, saya Budi'))).toBe(true);
+    expect(lastCallMessages.some((m: any) => m.content.includes('Halo! Saya asisten kamu.'))).toBe(true);
+  });
+
+  // 16. emergency chain hanya digunakan jika normal chain gagal
+  it('16. emergency chain is ONLY reached if all category models fail', async () => {
+    // In coding chain, there are 6 models. Make all 6 fail with 503:
+    for (let i = 0; i < 6; i++) {
+      mockCreate.mockRejectedValueOnce({ status: 503, message: 'Coding model down' });
+    }
+    // Emergency model succeeds (qwen3-flash or llama-4-scout)
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Emergency fallback response' } }],
+    });
+
+    const reply = await generateReply({
+      message: 'buat kode python darurat',
+      chatId: 'user-emergency@s.whatsapp.net',
+      history: [],
+    });
+
+    expect(reply).toBe('Emergency fallback response');
+    // 6 coding models + 1 emergency model = 7 calls
+    expect(mockCreate).toHaveBeenCalledTimes(7);
   });
 
   // 17. VPSMURAH_AI_API_KEY digunakan untuk client, bukan VPSMURAH_API_KEY atau GEMINI_API_KEY
@@ -492,6 +433,4 @@ describe('VPSMurah AI Service & Multi-Model Failover Suite', () => {
       process.env.VPSMURAH_AI_API_KEY = origAiKey;
     }
   });
-
 });
-

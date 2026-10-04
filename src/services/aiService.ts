@@ -1,22 +1,21 @@
 /**
- * Unified AI Service with Multi-Model Automatic Failover.
+ * Unified AI Service with Smart Model Routing & Multi-Model Automatic Failover.
  * Supports VPSMurah OpenAI-compatible API and Google Gemini direct SDK.
  *
- * Model Chain Priority:
- * 1. gemini-38
- * 2. gemini-37
- * 3. gemini-36
- * 4. gemini-35
- * 5. qwen3-flash
- * 6. gpt-5-mini
- * 7. gpt-4o-mini
- * 8. mistral-small
+ * Task Categories & Chains:
+ * - General: gemini-38 -> gemini-37 -> gemini-36 -> qwen3-flash -> gpt-5-mini -> gpt-4o-mini -> mistral-small
+ * - Coding: gemini-38 -> gpt-53-codex -> qwen3-coder -> deepseek-coder -> codestral -> gpt-5-mini
+ * - Reasoning: gemini-38 -> gemini-37 -> qwen3-plus -> deepseek-r1 -> kimi-k3 -> gpt-55
+ * - Longform: gemini-38 -> gemini-37 -> qwen3-max -> gpt-55 -> llama-4-maverick
+ * - Emergency: qwen3-flash -> gpt-5-mini -> llama-4-scout -> mistral-small
  */
 
 import OpenAI from 'openai';
 import { config, getVpsmurahAiApiKey } from '../config';
 import { ConversationEntry } from '../types/whatsapp';
 import { logger } from '../utils/logger';
+
+export type TaskType = 'general' | 'coding' | 'reasoning' | 'longform';
 
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant';
@@ -31,7 +30,10 @@ export interface GenerateReplyParams {
 }
 
 // Diagnostics state
+let lastTaskType: TaskType = 'general';
 let lastUsedModel = '';
+let lastAIDurationMs = 0;
+let lastFallbackCount = 0;
 let lastAIStatus: 'success' | 'failed' | 'idle' = 'idle';
 
 // Allow overriding OpenAI client for testing
@@ -42,7 +44,10 @@ export function setTestOpenAIClient(client: OpenAI | null): void {
 }
 
 export function resetAIState(): void {
+  lastTaskType = 'general';
   lastUsedModel = '';
+  lastAIDurationMs = 0;
+  lastFallbackCount = 0;
   lastAIStatus = 'idle';
   testOpenAIClient = null;
 }
@@ -50,20 +55,102 @@ export function resetAIState(): void {
 export function getAIDiagnostics(): {
   aiProvider: string;
   primaryModel: string;
+  lastTaskType: string;
   lastUsedModel: string;
+  lastAIDurationMs: number;
+  lastFallbackCount: number;
   lastAIStatus: string;
 } {
   const primaryModel =
     config.aiProvider === 'vpsmurah'
-      ? config.aiModelChain[0] || 'none'
+      ? config.aiGeneralChain[0] || config.aiModelChain[0] || 'gemini-38'
       : config.geminiModel;
 
   return {
     aiProvider: config.aiProvider,
     primaryModel,
+    lastTaskType,
     lastUsedModel: lastUsedModel || primaryModel,
+    lastAIDurationMs,
+    lastFallbackCount,
     lastAIStatus,
   };
+}
+
+/**
+ * Lightweight local heuristic classifier to route prompts to optimal model chains.
+ * Zero external AI calls for speed and zero added latency.
+ */
+export function detectTaskType(text: string): TaskType {
+  if (!text || typeof text !== 'string') {
+    return 'general';
+  }
+
+  const normalized = text.toLowerCase().trim();
+
+  // 1. Longform Heuristic (essays, reports, proposals, comprehensive analysis, word counts)
+  const longformPatterns = [
+    /\b(buat|tulis|bikin)?\s*essay\b/i,
+    /\b(buat|tulis|bikin)?\s*esai\b/i,
+    /\bjelaskan\s+lengkap\b/i,
+    /\banalisis\s+panjang\b/i,
+    /\b(buat|tulis|bikin)?\s*laporan\b/i,
+    /\b(buat|tulis|bikin)?\s*proposal\b/i,
+    /\brangkum\s+lengkap\b/i,
+    /\b(makalah|skripsi|tesis)\b/i,
+    /\b\d+\s*kata\b/i,
+    /\bessay\s+panjang\b/i,
+    /\b(panjang\s+lebar|secara\s+komprehensif|mendalam\s+dan\s+lengkap)\b/i,
+  ];
+
+  for (const pattern of longformPatterns) {
+    if (pattern.test(normalized)) {
+      return 'longform';
+    }
+  }
+
+  // 2. Coding Heuristic (code, programming languages, functions, classes, debug, web development)
+  const codingPatterns = [
+    /```[\s\S]*?```/,
+    /\b(python|javascript|typescript|java|c\+\+|golang|rust|php|ruby|swift|kotlin|csharp|html|css|sql|bash|powershell)\b/i,
+    /\b(code|kode|coding|koding|programmer|program|pemrograman)\b/i,
+    /\b(debug|debugging|error|exception|stacktrace|syntax)\b/i,
+    /\b(function|fungsi|method|class|variable|regex|regexp)\b/i,
+    /\b(api|endpoint|rest\s*api|graphql|backend|frontend|fullstack|website|web\s*app)\b/i,
+    /\b(git|github|gitlab|docker|kubernetes|npm|yarn|pnpm|pip)\b/i,
+    /\b(react|vue|angular|svelte|nextjs|express|django|flask|laravel|spring)\b/i,
+    /\b(database|query|select\s+\*|insert\s+into|join)\b/i,
+  ];
+
+  for (const pattern of codingPatterns) {
+    if (pattern.test(normalized)) {
+      return 'coding';
+    }
+  }
+
+  // 3. Reasoning Heuristic (math, logic, algorithm, complex problems, calculations, probability)
+  const reasoningPatterns = [
+    /\b(matematika|math)\b/i,
+    /\b(logika|logic)\b/i,
+    /\b(analisis|analisa|analyze|analysis)\b/i,
+    /\b(algoritma|algorithm)\b/i,
+    /\b(soal\s+kompleks|problem\s+solving)\b/i,
+    /\b(reasoning|penalaran|deduksi|induksi)\b/i,
+    /\b(probabilitas|peluang|probability)\b/i,
+    /\b(hitung|kalkulasi|calculate|rumus|persamaan|aljabar|integral|turunan|geometri|trigonometri)\b/i,
+    /\b(teka-teki|riddle|puzzle)\b/i,
+    /\b(pecahkan|buktikan|hipotesis)\b/i,
+    /\d+\s*[\+\-\*\/\^]\s*\d+/,
+  ];
+
+  for (const pattern of reasoningPatterns) {
+    if (pattern.test(normalized)) {
+      return 'reasoning';
+    }
+  }
+
+  // 4. Default to General Chat
+  return 'general';
 }
 
 /**
@@ -159,10 +246,44 @@ export function formatOpenAIHistory(
 }
 
 /**
- * Call VPSMurah AI Service with multi-model automatic failover.
+ * Get active model chains based on detected task type.
+ */
+export function getModelChainsForTask(taskType: TaskType): {
+  categoryChain: string[];
+  emergencyChain: string[];
+} {
+  let categoryChain: string[];
+
+  switch (taskType) {
+    case 'coding':
+      categoryChain = config.aiCodingChain.length > 0 ? config.aiCodingChain : ['gemini-38', 'gpt-53-codex', 'qwen3-coder', 'deepseek-coder', 'codestral', 'gpt-5-mini'];
+      break;
+    case 'reasoning':
+      categoryChain = config.aiReasoningChain.length > 0 ? config.aiReasoningChain : ['gemini-38', 'gemini-37', 'qwen3-plus', 'deepseek-r1', 'kimi-k3', 'gpt-55'];
+      break;
+    case 'longform':
+      categoryChain = config.aiLongformChain.length > 0 ? config.aiLongformChain : ['gemini-38', 'gemini-37', 'qwen3-max', 'gpt-55', 'llama-4-maverick'];
+      break;
+    case 'general':
+    default:
+      categoryChain = config.aiGeneralChain.length > 0 ? config.aiGeneralChain : ['gemini-38', 'gemini-37', 'gemini-36', 'qwen3-flash', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
+      break;
+  }
+
+  const emergencyChain = config.aiEmergencyChain.length > 0 ? config.aiEmergencyChain : ['qwen3-flash', 'gpt-5-mini', 'llama-4-scout', 'mistral-small'];
+
+  return { categoryChain, emergencyChain };
+}
+
+/**
+ * Call VPSMurah AI Service with smart task routing and multi-model automatic failover.
  */
 export async function generateReplyWithFailover(params: GenerateReplyParams): Promise<string> {
   const { message, senderName, history } = params;
+
+  // 1. Smart routing (local heuristic)
+  const taskType = detectTaskType(message);
+  logger.ai.info(`task=${taskType}`);
 
   // Truncate input to max chars
   const truncatedMessage = message.substring(0, config.maxInputChars);
@@ -179,28 +300,78 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     config.maxHistoryMessages
   );
 
-  const modelChain =
-    config.aiModelChain && config.aiModelChain.length > 0
-      ? config.aiModelChain
-      : ['gemini-38', 'gemini-37', 'gemini-36', 'gemini-35', 'qwen3-flash', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
+  const { categoryChain, emergencyChain } = getModelChainsForTask(taskType);
 
-  let switchedToSecondary = false;
+  // Build failover candidate list: category models first, then unattempted emergency models
+  const plannedModels: { model: string; isEmergency: boolean }[] = [];
+  for (const m of categoryChain) {
+    plannedModels.push({ model: m, isEmergency: false });
+  }
+  for (const m of emergencyChain) {
+    if (!categoryChain.includes(m)) {
+      plannedModels.push({ model: m, isEmergency: true });
+    }
+  }
 
-  for (let i = 0; i < modelChain.length; i++) {
-    const model = modelChain[i];
-    const nextModel = i + 1 < modelChain.length ? modelChain[i + 1] : null;
+  const overallStartTime = Date.now();
+  const totalTimeoutMs = config.aiTotalTimeoutMs || 10000;
+  let fallbackCount = 0;
+  let switchedToEmergency = false;
 
-    logger.ai.info(`request model=${model}`);
+  for (let i = 0; i < plannedModels.length; i++) {
+    const { model, isEmergency } = plannedModels[i];
+    const next = i + 1 < plannedModels.length ? plannedModels[i + 1] : null;
+
+    // Check overall total timeout constraint
+    const elapsedTotal = Date.now() - overallStartTime;
+    const remainingTotalMs = totalTimeoutMs - elapsedTotal;
+    if (remainingTotalMs <= 0) {
+      logger.ai.warn(`total timeout reached (${totalTimeoutMs}ms), aborting model failover`);
+      break;
+    }
+
+    if (isEmergency && !switchedToEmergency) {
+      logger.ai.warn('Category chain exhausted, switching to emergency fallback chain');
+      switchedToEmergency = true;
+    }
+
+    const perModelTimeout = Math.min(config.aiModelTimeoutMs || 4000, remainingTotalMs);
+    const modelStartTime = Date.now();
+    logger.ai.info(`model=${model} start`);
 
     try {
       const client = getOpenAIClient();
-      const completion = await client.chat.completions.create({
-        model,
-        messages,
+
+      // Enforce per-model timeout with AbortController and Promise.race
+      const controller = new AbortController();
+      let timer: NodeJS.Timeout | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const timeoutErr: any = new Error(`Model ${model} timed out after ${perModelTimeout}ms`);
+          timeoutErr.status = 408;
+          timeoutErr.statusCode = 408;
+          timeoutErr.code = 'ETIMEDOUT';
+          controller.abort();
+          reject(timeoutErr);
+        }, perModelTimeout);
+        if (typeof timer.unref === 'function') timer.unref();
       });
 
+      let completion: any;
+      try {
+        completion = await Promise.race([
+          client.chat.completions.create(
+            { model, messages },
+            { signal: controller.signal, timeout: perModelTimeout }
+          ),
+          timeoutPromise,
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
       // Response validation
-      const choice = completion.choices && completion.choices[0];
+      const choice = completion?.choices && completion.choices[0];
       const content = choice?.message?.content;
 
       if (!content || !content.trim()) {
@@ -209,15 +380,23 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       }
 
       // Success!
-      const reply = content.trim();
-      logger.ai.info(`model=${model} success`);
+      const duration = Date.now() - modelStartTime;
+      logger.ai.info(`model=${model} success duration=${duration}ms`);
       logger.ai.info('reply generated');
 
+      lastTaskType = taskType;
       lastUsedModel = model;
+      lastAIDurationMs = Date.now() - overallStartTime;
+      lastFallbackCount = fallbackCount;
       lastAIStatus = 'success';
-      return reply;
+      return content.trim();
     } catch (err: any) {
-      const status = err.status || err.statusCode || err.response?.status || 'error';
+      fallbackCount++;
+      const status =
+        err.status ||
+        err.statusCode ||
+        (err.name === 'AbortError' || err.message?.includes('timed out') ? 408 : 'error');
+
       const rawMsg = err.message || String(err);
       const sanitizedMsg = rawMsg
         .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED]')
@@ -229,24 +408,24 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       // Non-retryable error check (401 invalid key, 403 forbidden, invalid config)
       if (status === 401 || status === 403 || err.code === 'ERR_INVALID_URL') {
         logger.ai.error(`configuration/provider error status=${status} message=${sanitizedMsg}`);
+        lastTaskType = taskType;
+        lastAIDurationMs = Date.now() - overallStartTime;
+        lastFallbackCount = fallbackCount;
         lastAIStatus = 'failed';
         throw err;
       }
 
-      // If there is a next model to try:
-      if (nextModel) {
-        // Log notice when all Gemini models have failed and we are about to try non-Gemini
-        if (!switchedToSecondary && isGeminiModel(model) && !isGeminiModel(nextModel)) {
-          logger.ai.warn('Gemini models unavailable, switching to secondary provider model');
-          switchedToSecondary = true;
-        }
-
-        logger.ai.info(`switching model=${nextModel}`);
+      // If there is a next model to try in chain
+      if (next) {
+        logger.ai.info(`switching model=${next.model}`);
       }
     }
   }
 
-  // If all models in the chain failed
+  // If all models in the chain failed or total timeout expired
+  lastTaskType = taskType;
+  lastAIDurationMs = Date.now() - overallStartTime;
+  lastFallbackCount = fallbackCount;
   lastAIStatus = 'failed';
   throw new Error('All AI models failed in failover chain');
 }

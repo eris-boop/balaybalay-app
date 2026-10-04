@@ -73,6 +73,17 @@ function parseModelChain(raw: string): string[] {
 const DEFAULT_MODEL_CHAIN =
   'gemini-38,gemini-37,gemini-36,gemini-35,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
 
+const DEFAULT_GENERAL_CHAIN =
+  'gemini-38,gemini-37,gemini-36,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
+const DEFAULT_CODING_CHAIN =
+  'gemini-38,gpt-53-codex,qwen3-coder,deepseek-coder,codestral,gpt-5-mini';
+const DEFAULT_REASONING_CHAIN =
+  'gemini-38,gemini-37,qwen3-plus,deepseek-r1,kimi-k3,gpt-55';
+const DEFAULT_LONGFORM_CHAIN =
+  'gemini-38,gemini-37,qwen3-max,gpt-55,llama-4-maverick';
+const DEFAULT_EMERGENCY_CHAIN =
+  'qwen3-flash,gpt-5-mini,llama-4-scout,mistral-small';
+
 export const config = {
   port: optionalInt('PORT', 3000),
   nodeEnv: optional('NODE_ENV', 'development'),
@@ -91,7 +102,13 @@ export const config = {
   vpsmurahAiBaseUrl: optional('VPSMURAH_AI_BASE_URL', 'https://my.vpsmurah.co.id/api/v1'),
   vpsmurahAiApiKey: cleanApiKey(optional('VPSMURAH_AI_API_KEY', '')),
   aiModelChain: parseModelChain(optional('AI_MODEL_CHAIN', DEFAULT_MODEL_CHAIN)),
-  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 12000),
+  aiGeneralChain: parseModelChain(optional('AI_GENERAL_CHAIN', DEFAULT_GENERAL_CHAIN)),
+  aiCodingChain: parseModelChain(optional('AI_CODING_CHAIN', DEFAULT_CODING_CHAIN)),
+  aiReasoningChain: parseModelChain(optional('AI_REASONING_CHAIN', DEFAULT_REASONING_CHAIN)),
+  aiLongformChain: parseModelChain(optional('AI_LONGFORM_CHAIN', DEFAULT_LONGFORM_CHAIN)),
+  aiEmergencyChain: parseModelChain(optional('AI_EMERGENCY_CHAIN', DEFAULT_EMERGENCY_CHAIN)),
+  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 4000),
+  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 10000),
 
   // Google Gemini AI (Direct SDK fallback)
   geminiApiKey: optional('GEMINI_API_KEY', ''),

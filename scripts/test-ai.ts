@@ -22,15 +22,16 @@ function maskApiKey(key: string): string {
 async function main(): Promise<void> {
   // Dynamically import application config and services after dotenv has completed loading
   const { config } = await import('../src/config');
-  const { generateReply, getAIDiagnostics, getOpenAIClient } = await import(
+  const { detectTaskType, generateReply, getAIDiagnostics, getOpenAIClient } = await import(
     '../src/services/aiService'
   );
 
   const userPrompt = process.argv.slice(2).join(' ').trim() || 'Halo';
+  const taskType = detectTaskType(userPrompt);
   const providerName = config.aiProvider === 'vpsmurah' ? 'VPSMurah' : 'Google Gemini';
   const primaryModel =
     config.aiProvider === 'vpsmurah'
-      ? config.aiModelChain[0] || 'gemini-38'
+      ? config.aiGeneralChain[0] || 'gemini-38'
       : config.geminiModel;
 
   const rawEnvKey = process.env.VPSMURAH_AI_API_KEY || '';
@@ -39,6 +40,7 @@ async function main(): Promise<void> {
 
   console.log(`🤖 [AI TEST] Starting AI connectivity test...`);
   console.log(`Provider: ${providerName}`);
+  console.log(`Detected task: ${taskType}`);
   console.log(`Base URL: ${config.vpsmurahAiBaseUrl}`);
   console.log(`API key configured: ${Boolean(rawEnvKey)}`);
   console.log(`API key length: ${rawEnvKey.length}`);
@@ -60,11 +62,14 @@ async function main(): Promise<void> {
 
     console.log(`\n✅ [AI TEST] SUCCESS`);
     console.log(`Provider: ${providerName}`);
+    console.log(`Task type: ${diag.lastTaskType || taskType}`);
     console.log(`Primary model: ${primaryModel}`);
     console.log(`Model used: ${modelUsed}`);
     if (fallbackUsed) {
       console.log(`Fallback used: true`);
+      console.log(`Fallback count: ${diag.lastFallbackCount}`);
     }
+    console.log(`Duration: ${diag.lastAIDurationMs}ms`);
     console.log(`Response: ${response}`);
 
     process.exitCode = 0;
@@ -77,6 +82,7 @@ async function main(): Promise<void> {
 
     console.error(`\n❌ [AI TEST] FAILED`);
     console.error(`Provider: ${providerName}`);
+    console.error(`Task type: ${taskType}`);
     console.error(`Primary model: ${primaryModel}`);
     console.error(`Error: ${sanitizedMsg}`);
 
