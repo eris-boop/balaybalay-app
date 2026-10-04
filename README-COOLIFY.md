@@ -35,9 +35,29 @@ Sesi login WhatsApp disimpan pada path container:
 
 ---
 
-## 3. Konfigurasi Environment Variables di Coolify
+## 3. Setup PostgreSQL Resource di Coolify (Persistent Long-Term Memory)
 
-Masuk ke tab **Environment Variables** di resource Coolify Anda, lalu masukkan variabel berikut:
+Bot WhatsApp ini menggunakan **PostgreSQL internal** di VPS/Coolify yang sama untuk menyimpan conversation history, long-term memory summary, dan full-text search tanpa memerlukan database cloud eksternal.
+
+### Langkah-langkah Pembuatan Database PostgreSQL:
+1. Buka dashboard **Coolify** Anda.
+2. Masuk ke **Project** yang sama dengan aplikasi bot WhatsApp Anda.
+3. Klik tombol **+ New Resource**.
+4. Pilih kategori **Database**.
+5. Pilih **PostgreSQL**.
+6. Isi konfigurasi database (misalnya Database Name: `balaybalay`).
+7. **JANGAN centang "Expose to public internet"** (Port 5432 tidak perlu dibuka ke publik; bot dan database terhubung melalui internal Docker network Coolify).
+8. Pastikan **Persistent Volume** PostgreSQL aktif (secara default sudah aktif di Coolify agar data tidak hilang saat restart/redeploy).
+9. Klik **Deploy** pada resource PostgreSQL Anda.
+10. Setelah status PostgreSQL *Running*, buka tab **General** atau **Environment Variables** pada resource PostgreSQL tersebut.
+11. Salin **Internal Connection String** (format: `postgresql://USER:PASSWORD@INTERNAL_HOST:5432/balaybalay`).
+12. Masuk kembali ke resource aplikasi bot WhatsApp Anda > tab **Environment Variables**, dan masukkan nilai tersebut ke variable `DATABASE_URL`.
+
+---
+
+## 4. Konfigurasi Environment Variables di Coolify
+
+Masuk ke tab **Environment Variables** di resource bot Coolify Anda, lalu masukkan variabel berikut:
 
 ```env
 NODE_ENV=production
@@ -47,18 +67,53 @@ PORT=3000
 WHATSAPP_PROVIDER=baileys
 WHATSAPP_AUTH_DIR=/app/data/wa-auth
 
-# Keamanan QR Login (Buat token acak yang kuat)
+# Keamanan Admin Diagnostics & Memory Management
 ADMIN_TOKEN=buat_token_rahasia_anda_disini_123456
 
-# Google Gemini AI (dari Google AI Studio)
+# PostgreSQL Database (Coolify Internal Resource)
+DATABASE_URL=postgresql://postgres:password123@balaybalay-postgres:5432/balaybalay
+
+# Persistent Memory & Summarization
+MAX_HISTORY_MESSAGES=20
+MEMORY_SUMMARY_ENABLED=true
+MEMORY_SUMMARY_AFTER_MESSAGES=30
+MEMORY_SUMMARY_KEEP_RECENT=20
+
+# Full-Text Search Retrieval
+MEMORY_RETRIEVAL_ENABLED=true
+MEMORY_RETRIEVAL_LIMIT=6
+MEMORY_MAX_CONTEXT_CHARS=12000
+
+# Profanity Filter (Bot Output Masking)
+PROFANITY_FILTER_ENABLED=true
+PROFANITY_FILTER_MODE=mask
+PROFANITY_EXTRA_WORDS=
+
+# AI Provider Configuration (VPSMurah OpenAI-Compatible Smart Router)
+AI_PROVIDER=vpsmurah
+VPSMURAH_AI_BASE_URL=https://my.vpsmurah.co.id/api/v1
+VPSMURAH_AI_API_KEY=vps_ai_live_...
+
+# Smart Category Chains (Gemini top priority)
+AI_GENERAL_CHAIN=gemini-38,gemini-37,gemini-36,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small
+AI_CODING_CHAIN=gemini-38,gpt-53-codex,qwen3-coder,deepseek-coder,codestral,gpt-5-mini
+AI_REASONING_CHAIN=gemini-38,gemini-37,qwen3-plus,deepseek-r1,kimi-k3,gpt-55
+AI_LONGFORM_CHAIN=gemini-38,gemini-37,qwen3-max,gpt-55,llama-4-maverick
+AI_EMERGENCY_CHAIN=qwen3-flash,gpt-5-mini,llama-4-scout,mistral-small
+
+# Timeouts & Deadlines
+AI_MODEL_TIMEOUT_MS=4000
+AI_TOTAL_TIMEOUT_MS=10000
+CHAT_JOB_TIMEOUT_MS=12000
+
+# Direct Google Gemini Fallback (Optional Last Resort)
+AI_DIRECT_GEMINI_FALLBACK=true
 GEMINI_API_KEY=AIzaSy...
 GEMINI_MODEL=gemini-3.7-flash
-GEMINI_FALLBACK_MODEL=
 
 # Perilaku Bot
 RESPOND_IN_PRIVATE=true
 MAX_INPUT_CHARS=8000
-MAX_HISTORY_MESSAGES=10
 
 # System Prompt Kustom (Opsional)
 SYSTEM_PROMPT=Kamu adalah asisten WhatsApp yang ramah, ringkas, dan cerdas.

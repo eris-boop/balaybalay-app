@@ -31,14 +31,21 @@ import {
   getAIDiagnostics,
   getOpenAIClient,
   formatOpenAIHistory,
+  sanitizeHistory,
+  isModelHealthy,
+  recordModelFailure,
+  resetCircuitBreakers,
 } from '../src/services/aiService';
 import { processIncomingMessage } from '../src/services/messageProcessor';
 import { memory } from '../src/services/memory';
 import { idempotency } from '../src/services/idempotency';
 import * as whatsappService from '../src/services/whatsapp';
+import * as geminiService from '../src/services/gemini';
+import { chatQueue } from '../src/utils/queue';
 import { config } from '../src/config';
 import { logger } from '../src/utils/logger';
 import OpenAI from 'openai';
+
 
 describe('Smart Model Router & Multi-Model Failover Suite', () => {
   let mockCreate: any;
@@ -90,6 +97,9 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     ];
     (config as any).aiModelTimeoutMs = 4000;
     (config as any).aiTotalTimeoutMs = 10000;
+    (config as any).chatJobTimeoutMs = 12000;
+    (config as any).aiDirectGeminiFallback = true;
+    geminiService.setTestGeminiDirectHandler(null);
 
     mockCreate = vi.fn();
     const mockClient = {
@@ -433,4 +443,320 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
       process.env.VPSMURAH_AI_API_KEY = origAiKey;
     }
   });
+
+  // 19. EXACT BUG REPRODUCTION: Halo -> Fail -> Hi succeeds without memory poisoning
+  it('19. exact bug reproduction: Halo -> Fail -> Hi succeeds without memory poisoning', async () => {
+    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
+    const chatId = 'user-bug-repro@s.whatsapp.net';
+
+    // Message 1: "Halo" succeeds
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Halo juga!' } }],
+    });
+    const res1 = await processIncomingMessage({
+      messageId: 'MSG_1',
+      chatId,
+      senderId: chatId,
+      text: 'Halo',
+      isGroup: false,
+      isFromMe: false,
+      mentionedIds: [],
+      timestamp: 1000,
+      messageType: 'text',
+    });
+    expect(res1).toBe(true);
+    expect(memory.getHistory(chatId)).toHaveLength(2);
+
+    // Message 2: All models fail
+    mockCreate.mockRejectedValue({ status: 503, message: 'Provider overload' });
+    const res2 = await processIncomingMessage({
+      messageId: 'MSG_2',
+      chatId,
+      senderId: chatId,
+      text: 'Pesan gagal total',
+      isGroup: false,
+      isFromMe: false,
+      mentionedIds: [],
+      timestamp: 2000,
+      messageType: 'text',
+    });
+    expect(res2).toBe(false);
+
+    // ASSERT: failed Message 2 and fallback text are NOT in history!
+    const histAfterFail = memory.getHistory(chatId);
+    expect(histAfterFail).toHaveLength(2);
+    expect(histAfterFail.some((e) => e.content.includes('Pesan gagal total'))).toBe(false);
+    expect(histAfterFail.some((e) => e.content.includes('gangguan sementara'))).toBe(false);
+
+    // Message 3: "Hi" succeeds
+    mockCreate.mockReset();
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Hai kembali!' } }],
+    });
+    const res3 = await processIncomingMessage({
+      messageId: 'MSG_3',
+      chatId,
+      senderId: chatId,
+      text: 'Hi',
+      isGroup: false,
+      isFromMe: false,
+      mentionedIds: [],
+      timestamp: 3000,
+      messageType: 'text',
+    });
+    expect(res3).toBe(true);
+
+    // ASSERT: Message 3 succeeds and memory now has 4 valid entries!
+    const histFinal = memory.getHistory(chatId);
+    expect(histFinal).toHaveLength(4);
+    expect(histFinal[2].content).toBe('Hi');
+    expect(histFinal[3].content).toBe('Hai kembali!');
+  });
+
+  // 20. failed request does not mutate memory
+  it('20. failed request does not mutate memory', async () => {
+    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
+    const chatId = 'user-clean-mem@s.whatsapp.net';
+    mockCreate.mockRejectedValue({ status: 500, message: 'Crash' });
+
+    await processIncomingMessage({
+      messageId: 'MSG_FAIL_ONLY',
+      chatId,
+      senderId: chatId,
+      text: 'Pesan gagal saja',
+      isGroup: false,
+      isFromMe: false,
+      mentionedIds: [],
+      timestamp: 1000,
+      messageType: 'text',
+    });
+
+    expect(memory.getHistory(chatId)).toHaveLength(0);
+  });
+
+  // 21. fallback text not stored in memory
+  it('21. fallback text is never stored in memory', () => {
+    const raw = [
+      { role: 'user' as const, content: 'Tanya', timestamp: 1 },
+      {
+        role: 'assistant' as const,
+        content: 'AI sedang mengalami gangguan sementara. Coba lagi beberapa saat ya.',
+        timestamp: 2,
+      },
+      { role: 'user' as const, content: 'Tanya 2', timestamp: 3 },
+    ];
+    const cleaned = sanitizeHistory(raw);
+    expect(cleaned).toHaveLength(2);
+    expect(cleaned.some((e) => e.content.includes('gangguan sementara'))).toBe(false);
+  });
+
+  // 22. next message after failure succeeds
+  it('22. next message after failure succeeds without context degradation', async () => {
+    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
+    const chatId = 'user-seq@s.whatsapp.net';
+
+    // First attempt fails
+    mockCreate.mockRejectedValueOnce({ status: 502, message: 'Bad Gateway' });
+    await processIncomingMessage({
+      messageId: 'M1',
+      chatId,
+      senderId: chatId,
+      text: 'Pertama gagal',
+      isGroup: false,
+      isFromMe: false,
+      mentionedIds: [],
+      timestamp: 1000,
+      messageType: 'text',
+    });
+
+    // Second attempt succeeds
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Kedua sukses!' } }],
+    });
+    const res = await processIncomingMessage({
+      messageId: 'M2',
+      chatId,
+      senderId: chatId,
+      text: 'Kedua coba lagi',
+      isGroup: false,
+      isFromMe: false,
+      mentionedIds: [],
+      timestamp: 2000,
+      messageType: 'text',
+    });
+
+    expect(res).toBe(true);
+    expect(memory.getHistory(chatId)).toHaveLength(2);
+    expect(memory.getHistory(chatId)[0].content).toBe('Kedua coba lagi');
+  });
+
+  // 23. malformed history recovery without history succeeds
+  it('23. malformed history recovery without history succeeds', async () => {
+    const chatId = 'chat-malformed@s.whatsapp.net';
+    const dirtyHistory = [
+      { role: 'user' as const, content: 'Pesan lama yang bikin error 400', timestamp: 1 },
+      { role: 'assistant' as const, content: 'Respon lama', timestamp: 2 },
+    ];
+
+    mockCreate.mockImplementation(async (params: any) => {
+      const userCount = params.messages.filter((m: any) => m.role === 'user').length;
+      if (userCount > 1) {
+        throw { status: 400, message: 'Invalid history payload' };
+      }
+      return { choices: [{ message: { content: 'Pulih tanpa history!' } }] };
+    });
+
+    const reply = await generateReply({
+      message: 'Halo baru',
+      chatId,
+      history: dirtyHistory,
+    });
+
+    expect(reply).toBe('Pulih tanpa history!');
+  });
+
+  // 24. timeout releases per-chat queue
+  it('24. timeout releases per-chat queue so subsequent messages are not blocked', async () => {
+    const chatId = 'chat-queue-timeout@s.whatsapp.net';
+    (config as any).chatJobTimeoutMs = 50;
+
+    try {
+      const p1 = chatQueue.run(chatId, async () => {
+        await new Promise((r) => setTimeout(r, 200));
+        return 'slow';
+      });
+
+      await expect(p1).rejects.toThrow(/timed out/);
+
+      const p2 = await chatQueue.run(chatId, async () => {
+        return 'fast';
+      });
+
+      expect(p2).toBe('fast');
+    } finally {
+      (config as any).chatJobTimeoutMs = 12000;
+    }
+  });
+
+  // 25. exception releases per-chat queue
+  it('25. exception in job releases per-chat queue for next job', async () => {
+    const chatId = 'chat-queue-ex@s.whatsapp.net';
+
+    const p1 = chatQueue.run(chatId, async () => {
+      throw new Error('Fatal task crash');
+    });
+
+    await expect(p1).rejects.toThrow('Fatal task crash');
+
+    const p2 = await chatQueue.run(chatId, async () => {
+      return 'recovered';
+    });
+
+    expect(p2).toBe('recovered');
+  });
+
+  // 26. one chat failure does not affect another chat
+  it('26. failure in one chat does not affect concurrent chat', async () => {
+    vi.spyOn(whatsappService, 'sendMessage').mockResolvedValue({ success: true });
+
+    mockCreate.mockImplementation(async (params: any) => {
+      const lastMsg = params.messages[params.messages.length - 1].content;
+      if (lastMsg.includes('ChatA')) {
+        throw { status: 500, message: 'Chat A error' };
+      }
+      return { choices: [{ message: { content: 'Chat B sukses!' } }] };
+    });
+
+    const [resA, resB] = await Promise.all([
+      processIncomingMessage({
+        messageId: 'M_A',
+        chatId: 'chatA@s.whatsapp.net',
+        senderId: 'userA@s.whatsapp.net',
+        text: 'Halo dari ChatA',
+        isGroup: false,
+        isFromMe: false,
+        mentionedIds: [],
+        timestamp: 1000,
+        messageType: 'text',
+      }),
+      processIncomingMessage({
+        messageId: 'M_B',
+        chatId: 'chatB@s.whatsapp.net',
+        senderId: 'userB@s.whatsapp.net',
+        text: 'Halo dari ChatB',
+        isGroup: false,
+        isFromMe: false,
+        mentionedIds: [],
+        timestamp: 1000,
+        messageType: 'text',
+      }),
+    ]);
+
+    expect(resA).toBe(false);
+    expect(resB).toBe(true);
+    expect(memory.getHistory('chatB@s.whatsapp.net')).toHaveLength(2);
+  });
+
+  // 27. circuit breaker skips unhealthy model
+  it('27. circuit breaker skips model after 3 consecutive failures', async () => {
+    (config as any).circuitBreakerFailures = 3;
+    (config as any).circuitBreakerCooldownMs = 30000;
+
+    recordModelFailure('gemini-38', 503);
+    recordModelFailure('gemini-38', 503);
+    recordModelFailure('gemini-38', 503);
+
+    expect(isModelHealthy('gemini-38')).toBe(false);
+
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Jawaban dari gemini-37' } }],
+    });
+
+    const reply = await generateReply({
+      message: 'Halo',
+      chatId: 'user-cb@s.whatsapp.net',
+      history: [],
+    });
+
+    expect(reply).toBe('Jawaban dari gemini-37');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(mockCreate.mock.calls[0][0].model).toBe('gemini-37');
+  });
+
+  // 28. cooldown recovery works
+  it('28. circuit breaker cooldown recovery allows model to be retried', () => {
+    resetCircuitBreakers();
+    (config as any).circuitBreakerFailures = 2;
+    (config as any).circuitBreakerCooldownMs = 10;
+
+    recordModelFailure('gemini-38', 429);
+    recordModelFailure('gemini-38', 429);
+    expect(isModelHealthy('gemini-38')).toBe(false);
+
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        expect(isModelHealthy('gemini-38')).toBe(true);
+        resolve();
+      }, 25);
+    });
+  });
+
+  // 29. direct Gemini fallback works when configured
+  it('29. direct Google Gemini fallback activates when all VPSMurah models fail', async () => {
+    (config as any).aiDirectGeminiFallback = true;
+    (config as any).geminiApiKey = 'test-gemini-key';
+
+    mockCreate.mockRejectedValue({ status: 503, message: 'All VPSMurah down' });
+    geminiService.setTestGeminiDirectHandler(async () => 'Jawaban dari Google Gemini Direct Fallback');
+
+    const reply = await geminiService.generateReply({
+      message: 'Halo darurat',
+      chatId: 'user-direct@s.whatsapp.net',
+      history: [],
+    });
+
+    expect(reply).toBe('Jawaban dari Google Gemini Direct Fallback');
+  });
+
 });
+

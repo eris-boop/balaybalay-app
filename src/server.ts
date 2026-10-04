@@ -14,6 +14,8 @@ import {
   getWhatsAppStatus,
 } from './services/whatsappClient';
 import { logger } from './utils/logger';
+import { initDatabase, closeDatabase, getDbPool } from './database/db';
+import { ensureSchema } from './database/schema';
 
 const app = express();
 
@@ -83,6 +85,22 @@ const server = app.listen(config.port, '0.0.0.0', () => {
   logger.server.info(`Primary AI Model: ${config.aiProvider === 'vpsmurah' ? (config.aiModelChain[0] || 'none') : config.geminiModel}`);
   logger.server.info(`Private chat responses: ${config.respondInPrivate ? 'enabled' : 'disabled'}`);
 
+  // Initialize PostgreSQL database and ensure schema
+  if (config.databaseUrl) {
+    initDatabase()
+      .then(async (connected: boolean) => {
+        if (connected) {
+          const pool = getDbPool();
+          if (pool) {
+            await ensureSchema(pool);
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        logger.database.warn('[DATABASE] unavailable - startup init failed:', (err as Error).message);
+      });
+  }
+
   // Initialize Baileys client if configured
   if (config.whatsappProvider === 'baileys') {
     initWhatsAppClient().catch((err) => {
@@ -95,6 +113,9 @@ const server = app.listen(config.port, '0.0.0.0', () => {
 function shutdown(signal: string) {
   logger.server.info(`${signal} received, shutting down gracefully...`);
   disconnectWhatsApp();
+  closeDatabase().catch((err: unknown) => {
+    logger.database.error('Error closing database on shutdown:', (err as Error).message);
+  });
   server.close(() => {
     logger.server.info('Server closed');
     process.exit(0);

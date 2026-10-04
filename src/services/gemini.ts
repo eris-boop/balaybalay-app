@@ -22,6 +22,8 @@ export interface GenerateReplyParams {
   senderName?: string;
   chatId: string;
   history: ConversationEntry[];
+  summary?: string | null;
+  relevantOldMessages?: ConversationEntry[];
 }
 
 /**
@@ -209,11 +211,24 @@ async function executeModelCall(
   return text.trim();
 }
 
+let testGeminiDirectHandler: ((params: GenerateReplyParams) => Promise<string>) | null = null;
+
+export function setTestGeminiDirectHandler(
+  handler: ((params: GenerateReplyParams) => Promise<string>) | null
+): void {
+  testGeminiDirectHandler = handler;
+}
+
 /**
  * Direct Google Gemini API generation.
  */
 export async function generateGeminiDirectReply(params: GenerateReplyParams): Promise<string> {
+  if (testGeminiDirectHandler) {
+    return testGeminiDirectHandler(params);
+  }
+
   const { message, senderName, chatId, history } = params;
+
 
   // Truncate input
   const truncatedMessage = message.substring(0, config.maxInputChars);
@@ -224,8 +239,14 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
     currentPrompt = `[${senderName}]: ${truncatedMessage}`;
   }
 
+  // Merge relevant old messages with history if present
+  const allHistory = [
+    ...(params.relevantOldMessages || []),
+    ...history,
+  ];
+
   // Sanitize previous history
-  const sanitizedHistory = sanitizeGeminiHistory(history);
+  const sanitizedHistory = sanitizeGeminiHistory(allHistory);
 
   logger.gemini.info(`history entries=${sanitizedHistory.length}`);
 
@@ -246,8 +267,13 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
   };
 
   // Only pass systemInstruction if configured and non-empty
-  if (config.systemPrompt && config.systemPrompt.trim() !== '') {
-    configObj.systemInstruction = config.systemPrompt.trim();
+  let effectiveSystemPrompt = (config.systemPrompt || '').trim();
+  if (params.summary && params.summary.trim()) {
+    effectiveSystemPrompt += `\n\n[MEMORI JANGKA PANJANG]\n${params.summary.trim()}`;
+  }
+
+  if (effectiveSystemPrompt !== '') {
+    configObj.systemInstruction = effectiveSystemPrompt;
   }
 
   const primaryModel = config.geminiModel;
@@ -337,10 +363,43 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
 
 /**
  * Unified reply generator delegating to configured provider.
+ * If VPSMurah and history recovery fail, uses direct Google Gemini as optional last resort.
  */
 export async function generateReply(params: GenerateReplyParams): Promise<string> {
   if (config.aiProvider === 'gemini') {
     return generateGeminiDirectReply(params);
   }
-  return generateReplyWithFailover(params);
+
+  try {
+    return await generateReplyWithFailover(params);
+  } catch (err) {
+    if (config.aiDirectGeminiFallback && config.geminiApiKey) {
+      logger.ai.info('trying direct Gemini fallback');
+      try {
+        const reply = await generateGeminiDirectReply(params);
+        logger.ai.info('direct Gemini fallback success');
+        logger.ai.info('reply generated');
+        return reply;
+      } catch (geminiErr: any) {
+        // If failed with history, try once without history
+        if (params.history && params.history.length > 0) {
+          try {
+            const recoveryReply = await generateGeminiDirectReply({
+              ...params,
+              history: [],
+            });
+            logger.ai.info('direct Gemini fallback success (history-free)');
+            logger.ai.info('reply generated');
+            return recoveryReply;
+          } catch {
+            // Ignore secondary failure
+          }
+        }
+        logger.gemini.error('Direct Gemini fallback failed:', geminiErr?.message || String(geminiErr));
+      }
+    }
+
+    throw err;
+  }
 }
+

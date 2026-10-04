@@ -68,7 +68,12 @@ export const logger = {
   whatsapp: createLogger('WHATSAPP'),
   ai: createLogger('AI'),
   gemini: createLogger('GEMINI'),
+  memory: createLogger('MEMORY'),
+  queue: createLogger('QUEUE'),
   error: createLogger('ERROR'),
   server: createLogger('SERVER'),
   polling: createLogger('POLLING'),
+  database: createLogger('DATABASE'),
+  profanity: createLogger('PROFANITY'),
 };
+

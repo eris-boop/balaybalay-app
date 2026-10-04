@@ -27,6 +27,8 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getBotIdentifiers, recordGeminiTimestamp } from './whatsappClient';
 import { chatQueue } from '../utils/queue';
+import { filterProfanity } from './profanityFilter';
+import { getLastAIResult } from './aiService';
 
 /**
  * Process an incoming message with per-chat serialization.
@@ -102,38 +104,48 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
     return true;
   }
 
-  // 1. Retrieve previous conversation history (clean, unpolluted)
-  const history = memory.getHistory(message.chatId);
+  // 1. Retrieve previous conversation context (recent history, summary, relevant old messages)
+  const context = await memory.loadContext(message.chatId, prompt);
+  const history = context.recentHistory;
+  logger.ai.info(`history entries=${history.length}`);
 
   try {
     recordGeminiTimestamp();
 
-    // 2. Generate AI reply via Gemini with previous history + current prompt
+    // 2. Generate AI reply via Gemini with previous history + current prompt + context
     const reply = await generateReply({
       message: prompt,
       senderName: message.senderName,
       chatId: message.chatId,
       history,
+      summary: context.summary,
+      relevantOldMessages: context.relevantOldMessages,
     });
 
-    // 3. Save memory ONLY after Gemini generation succeeds
-    memory.addEntry(message.chatId, {
-      role: 'user',
-      content: prompt,
-      timestamp: Date.now(),
+    // 3. Filter profanity for assistant response before sending and storing
+    const filteredReply = filterProfanity(reply);
+
+    // 4. Save memory ONLY after generation succeeds (Transactional Memory)
+    const aiMeta = getLastAIResult();
+    await memory.saveTurn({
+      chatId: message.chatId,
+      isGroup: Boolean(message.isGroup),
+      userMessageId: message.messageId,
+      senderId: message.senderId,
+      userPrompt: prompt,
+      assistantReply: filteredReply,
+      modelUsed: aiMeta.modelUsed,
+      taskType: aiMeta.taskType,
     });
 
-    memory.addEntry(message.chatId, {
-      role: 'assistant',
-      content: reply,
-      timestamp: Date.now(),
-    });
+    logger.memory.info('transaction committed');
 
-    // 4. Send reply back to EXACT remoteJid
-    await sendMessage(message.chatId, reply);
+    // 5. Send reply back to EXACT remoteJid
+    await sendMessage(message.chatId, filteredReply);
     logger.whatsapp.info('reply sent');
     return true;
   } catch (err) {
+    logger.memory.warn('AI failed - history unchanged');
     const error = err as any;
     logger.error.error('Gemini processing failed, handled gracefully:', error?.message || String(error));
 

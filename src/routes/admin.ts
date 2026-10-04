@@ -118,6 +118,9 @@ adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => 
   }
 });
 
+import { isDatabaseConnected } from '../database/db';
+import { memory } from '../services/memory';
+
 /**
  * GET /admin/status
  * Returns sanitized diagnostics data (protected by ADMIN_TOKEN).
@@ -125,8 +128,51 @@ adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => 
 adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
   const diag = getDiagnostics();
   const aiDiag = getAIDiagnostics();
+  const dbConnected = isDatabaseConnected();
+
   res.status(200).json({
     ...diag,
     ...aiDiag,
+    databaseConnected: dbConnected,
+    persistentMemory: dbConnected,
+    memorySummaryEnabled: config.memorySummaryEnabled,
+    memoryRetrievalEnabled: config.memoryRetrievalEnabled,
   });
+});
+
+/**
+ * DELETE /admin/memory/:chatId
+ * Delete a specific conversation's history and memories (protected by ADMIN_TOKEN).
+ */
+adminRouter.delete('/memory/:chatId', verifyAdminToken, async (req: Request, res: Response) => {
+  const rawChatId = req.params.chatId;
+  const chatId = Array.isArray(rawChatId) ? rawChatId[0] : rawChatId;
+  if (!chatId) {
+    res.status(400).json({ error: 'chatId parameter is required' });
+    return;
+  }
+
+  const deleted = await memory.deleteConversation(chatId);
+  if (deleted) {
+    res.status(200).json({ deleted: true });
+  } else {
+    res.status(200).json({ deleted: false, reason: 'not_found' });
+  }
+});
+
+/**
+ * DELETE /admin/memory
+ * Delete all conversation history and memories across all chats (protected by ADMIN_TOKEN).
+ * Requires explicit body confirmation: { "confirm": "DELETE_ALL_MEMORY" }
+ */
+adminRouter.delete('/memory', verifyAdminToken, async (req: Request, res: Response) => {
+  if (req.body?.confirm !== 'DELETE_ALL_MEMORY') {
+    res.status(400).json({
+      error: 'Confirmation required. Must send JSON body with { "confirm": "DELETE_ALL_MEMORY" }',
+    });
+    return;
+  }
+
+  memory.clearAll();
+  res.status(200).json({ deleted: true, all: true });
 });

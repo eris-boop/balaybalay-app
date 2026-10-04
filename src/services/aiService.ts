@@ -1,13 +1,7 @@
 /**
- * Unified AI Service with Smart Model Routing & Multi-Model Automatic Failover.
+ * Unified AI Service with Smart Model Routing, Multi-Model Failover,
+ * Lightweight Circuit Breaker, and History-Free Recovery.
  * Supports VPSMurah OpenAI-compatible API and Google Gemini direct SDK.
- *
- * Task Categories & Chains:
- * - General: gemini-38 -> gemini-37 -> gemini-36 -> qwen3-flash -> gpt-5-mini -> gpt-4o-mini -> mistral-small
- * - Coding: gemini-38 -> gpt-53-codex -> qwen3-coder -> deepseek-coder -> codestral -> gpt-5-mini
- * - Reasoning: gemini-38 -> gemini-37 -> qwen3-plus -> deepseek-r1 -> kimi-k3 -> gpt-55
- * - Longform: gemini-38 -> gemini-37 -> qwen3-max -> gpt-55 -> llama-4-maverick
- * - Emergency: qwen3-flash -> gpt-5-mini -> llama-4-scout -> mistral-small
  */
 
 import OpenAI from 'openai';
@@ -27,6 +21,8 @@ export interface GenerateReplyParams {
   senderName?: string;
   chatId: string;
   history: ConversationEntry[];
+  summary?: string | null;
+  relevantOldMessages?: ConversationEntry[];
 }
 
 // Diagnostics state
@@ -43,6 +39,63 @@ export function setTestOpenAIClient(client: OpenAI | null): void {
   testOpenAIClient = client;
 }
 
+// -------------------------------------------------------------
+// Circuit Breaker State (Per-Model)
+// -------------------------------------------------------------
+interface CircuitBreakerState {
+  consecutiveFailures: number;
+  unhealthyUntil: number; // timestamp ms
+}
+
+const circuitBreakers = new Map<string, CircuitBreakerState>();
+
+export function isModelHealthy(model: string): boolean {
+  const state = circuitBreakers.get(model);
+  if (!state) return true;
+  return state.unhealthyUntil <= Date.now();
+}
+
+export function recordModelSuccess(model: string): void {
+  circuitBreakers.delete(model);
+}
+
+export function recordModelFailure(model: string, status?: number | string): void {
+  const isTransient =
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    status === 408 ||
+    status === 'timeout' ||
+    status === 'ETIMEDOUT' ||
+    status === 'ECONNRESET';
+
+  if (!isTransient) return;
+
+  const current = circuitBreakers.get(model) || {
+    consecutiveFailures: 0,
+    unhealthyUntil: 0,
+  };
+
+  current.consecutiveFailures += 1;
+  const threshold = config.circuitBreakerFailures || 3;
+  const cooldownMs = config.circuitBreakerCooldownMs || 30000;
+
+  if (current.consecutiveFailures >= threshold) {
+    current.unhealthyUntil = Date.now() + cooldownMs;
+    logger.ai.warn(
+      `model=${model} circuit breaker tripped (${current.consecutiveFailures} failures), cooldown=${cooldownMs}ms`
+    );
+  }
+
+  circuitBreakers.set(model, current);
+}
+
+export function resetCircuitBreakers(): void {
+  circuitBreakers.clear();
+}
+
 export function resetAIState(): void {
   lastTaskType = 'general';
   lastUsedModel = '';
@@ -50,6 +103,7 @@ export function resetAIState(): void {
   lastFallbackCount = 0;
   lastAIStatus = 'idle';
   testOpenAIClient = null;
+  resetCircuitBreakers();
 }
 
 export function getAIDiagnostics(): {
@@ -75,6 +129,96 @@ export function getAIDiagnostics(): {
     lastFallbackCount,
     lastAIStatus,
   };
+}
+
+export function getLastAIResult(): { modelUsed: string; taskType: string } {
+  return {
+    modelUsed: lastUsedModel || (config.aiProvider === 'gemini' ? config.geminiModel : 'gemini-38'),
+    taskType: lastTaskType || 'general',
+  };
+}
+
+/**
+ * Filter out fallback/error messages from conversation history.
+ */
+const FALLBACK_PHRASES = [
+  'ai sedang mengalami gangguan sementara',
+  'ai sedang ramai sebentar',
+  'maaf, saya lagi mengalami gangguan',
+  'internal error',
+  'coba lagi beberapa saat ya',
+];
+
+export function isFallbackOrErrorText(text: string): boolean {
+  if (!text) return true;
+  const lower = text.toLowerCase();
+  return FALLBACK_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+/**
+ * Validates and sanitizes conversation history before sending to AI:
+ * - Maps valid roles (user, assistant)
+ * - Removes empty/whitespace entries
+ * - Removes fallback and error messages
+ * - Removes duplicate adjacent entries
+ * - Trims to maxPairs
+ */
+export function sanitizeHistory(
+  history: ConversationEntry[],
+  maxPairs = config.maxHistoryMessages
+): ConversationEntry[] {
+  if (!history || !Array.isArray(history) || history.length === 0) {
+    return [];
+  }
+
+  const cleanEntries: ConversationEntry[] = [];
+  let lastRole: string | null = null;
+  let lastContent: string | null = null;
+
+  for (const entry of history) {
+    if (!entry) continue;
+
+    const rawRole = (entry.role || '').toLowerCase().trim();
+    let role: 'user' | 'assistant' | null = null;
+    if (rawRole === 'user') {
+      role = 'user';
+    } else if (
+      rawRole === 'assistant' ||
+      rawRole === 'model' ||
+      rawRole === 'bot' ||
+      rawRole === 'ai'
+    ) {
+      role = 'assistant';
+    }
+
+    if (!role) continue;
+
+    const rawText = (typeof entry.content === 'string' ? entry.content : (entry as any).text) || '';
+    const content = rawText.trim();
+    if (!content) continue;
+
+    // Filter out fallback / error messages
+    if (isFallbackOrErrorText(content)) {
+      continue;
+    }
+
+    // Filter out duplicated adjacent item (same role and identical content)
+    if (role === lastRole && content === lastContent) {
+      continue;
+    }
+
+    lastRole = role;
+    lastContent = content;
+
+    cleanEntries.push({
+      role,
+      content,
+      timestamp: entry.timestamp || Date.now(),
+    });
+  }
+
+  const maxTurns = maxPairs * 2;
+  return cleanEntries.length > maxTurns ? cleanEntries.slice(-maxTurns) : cleanEntries;
 }
 
 /**
@@ -196,47 +340,46 @@ export function formatOpenAIHistory(
   history: ConversationEntry[],
   currentPrompt: string,
   systemPrompt?: string,
-  maxPairs = config.maxHistoryMessages
+  maxPairs = config.maxHistoryMessages,
+  summary?: string | null,
+  relevantOldMessages?: ConversationEntry[]
 ): OpenAIMessage[] {
   const messages: OpenAIMessage[] = [];
 
-  // 1. System Prompt
-  if (systemPrompt && systemPrompt.trim()) {
+  // 1. System Prompt + Long-Term Memory Summary
+  let effectiveSystemPrompt = (systemPrompt || config.systemPrompt || '').trim();
+  if (summary && summary.trim()) {
+    effectiveSystemPrompt += `\n\n[MEMORI JANGKA PANJANG]\n${summary.trim()}`;
+  }
+
+  if (effectiveSystemPrompt) {
     messages.push({
       role: 'system',
-      content: systemPrompt.trim(),
+      content: effectiveSystemPrompt,
     });
   }
 
-  // 2. Previous History
-  if (history && Array.isArray(history) && history.length > 0) {
-    const rawTurns: OpenAIMessage[] = [];
-    for (const entry of history) {
-      if (!entry) continue;
-
-      const rawRole = (entry.role || '').toLowerCase().trim();
-      let role: 'user' | 'assistant' | null = null;
-      if (rawRole === 'user') {
-        role = 'user';
-      } else if (rawRole === 'assistant' || rawRole === 'model' || rawRole === 'bot' || rawRole === 'ai') {
-        role = 'assistant';
-      }
-
-      if (!role) continue;
-
-      const rawText = (typeof entry.content === 'string' ? entry.content : (entry as any).text) || '';
-      const text = rawText.trim();
-      if (!text) continue;
-
-      rawTurns.push({ role, content: text });
+  // 2. Relevant Old Messages (from Full-Text Search, if any)
+  if (relevantOldMessages && relevantOldMessages.length > 0) {
+    const cleanRelevant = sanitizeHistory(relevantOldMessages, config.memoryRetrievalLimit);
+    for (const entry of cleanRelevant) {
+      messages.push({
+        role: entry.role,
+        content: `[Konteks chat lama relevan] ${entry.content}`,
+      });
     }
-
-    const maxTurns = maxPairs * 2;
-    const sliced = rawTurns.length > maxTurns ? rawTurns.slice(-maxTurns) : rawTurns;
-    messages.push(...sliced);
   }
 
-  // 3. Current User Message
+  // 3. Previous History (Cleaned & Validated)
+  const cleanHistory = sanitizeHistory(history, maxPairs);
+  for (const entry of cleanHistory) {
+    messages.push({
+      role: entry.role,
+      content: entry.content,
+    });
+  }
+
+  // 4. Current User Message
   messages.push({
     role: 'user',
     content: currentPrompt,
@@ -256,27 +399,43 @@ export function getModelChainsForTask(taskType: TaskType): {
 
   switch (taskType) {
     case 'coding':
-      categoryChain = config.aiCodingChain.length > 0 ? config.aiCodingChain : ['gemini-38', 'gpt-53-codex', 'qwen3-coder', 'deepseek-coder', 'codestral', 'gpt-5-mini'];
+      categoryChain =
+        config.aiCodingChain.length > 0
+          ? config.aiCodingChain
+          : ['gemini-38', 'gpt-53-codex', 'qwen3-coder', 'deepseek-coder', 'codestral', 'gpt-5-mini'];
       break;
     case 'reasoning':
-      categoryChain = config.aiReasoningChain.length > 0 ? config.aiReasoningChain : ['gemini-38', 'gemini-37', 'qwen3-plus', 'deepseek-r1', 'kimi-k3', 'gpt-55'];
+      categoryChain =
+        config.aiReasoningChain.length > 0
+          ? config.aiReasoningChain
+          : ['gemini-38', 'gemini-37', 'qwen3-plus', 'deepseek-r1', 'kimi-k3', 'gpt-55'];
       break;
     case 'longform':
-      categoryChain = config.aiLongformChain.length > 0 ? config.aiLongformChain : ['gemini-38', 'gemini-37', 'qwen3-max', 'gpt-55', 'llama-4-maverick'];
+      categoryChain =
+        config.aiLongformChain.length > 0
+          ? config.aiLongformChain
+          : ['gemini-38', 'gemini-37', 'qwen3-max', 'gpt-55', 'llama-4-maverick'];
       break;
     case 'general':
     default:
-      categoryChain = config.aiGeneralChain.length > 0 ? config.aiGeneralChain : ['gemini-38', 'gemini-37', 'gemini-36', 'qwen3-flash', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
+      categoryChain =
+        config.aiGeneralChain.length > 0
+          ? config.aiGeneralChain
+          : ['gemini-38', 'gemini-37', 'gemini-36', 'qwen3-flash', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
       break;
   }
 
-  const emergencyChain = config.aiEmergencyChain.length > 0 ? config.aiEmergencyChain : ['qwen3-flash', 'gpt-5-mini', 'llama-4-scout', 'mistral-small'];
+  const emergencyChain =
+    config.aiEmergencyChain.length > 0
+      ? config.aiEmergencyChain
+      : ['qwen3-flash', 'gpt-5-mini', 'llama-4-scout', 'mistral-small'];
 
   return { categoryChain, emergencyChain };
 }
 
 /**
- * Call VPSMurah AI Service with smart task routing and multi-model automatic failover.
+ * Call VPSMurah AI Service with smart task routing, multi-model automatic failover,
+ * lightweight circuit breaker, and history-free recovery.
  */
 export async function generateReplyWithFailover(params: GenerateReplyParams): Promise<string> {
   const { message, senderName, history } = params;
@@ -292,12 +451,15 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     currentPrompt = `[${senderName}]: ${truncatedMessage}`;
   }
 
-  // Format messages for OpenAI API
+  // Format messages for OpenAI API (Sanitizes history before request)
+  const cleanHistory = sanitizeHistory(history, config.maxHistoryMessages);
   const messages = formatOpenAIHistory(
-    history,
+    cleanHistory,
     currentPrompt,
     config.systemPrompt,
-    config.maxHistoryMessages
+    config.maxHistoryMessages,
+    params.summary,
+    params.relevantOldMessages
   );
 
   const { categoryChain, emergencyChain } = getModelChainsForTask(taskType);
@@ -313,14 +475,18 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     }
   }
 
+  // Check circuit breaker status: prioritize healthy models, or try all if none are healthy
+  const healthyPlanned = plannedModels.filter(({ model }) => isModelHealthy(model));
+  const modelsToAttempt = healthyPlanned.length > 0 ? healthyPlanned : plannedModels;
+
   const overallStartTime = Date.now();
   const totalTimeoutMs = config.aiTotalTimeoutMs || 10000;
   let fallbackCount = 0;
   let switchedToEmergency = false;
 
-  for (let i = 0; i < plannedModels.length; i++) {
-    const { model, isEmergency } = plannedModels[i];
-    const next = i + 1 < plannedModels.length ? plannedModels[i + 1] : null;
+  for (let i = 0; i < modelsToAttempt.length; i++) {
+    const { model, isEmergency } = modelsToAttempt[i];
+    const next = i + 1 < modelsToAttempt.length ? modelsToAttempt[i + 1] : null;
 
     // Check overall total timeout constraint
     const elapsedTotal = Date.now() - overallStartTime;
@@ -384,6 +550,7 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       logger.ai.info(`model=${model} success duration=${duration}ms`);
       logger.ai.info('reply generated');
 
+      recordModelSuccess(model);
       lastTaskType = taskType;
       lastUsedModel = model;
       lastAIDurationMs = Date.now() - overallStartTime;
@@ -396,6 +563,8 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
         err.status ||
         err.statusCode ||
         (err.name === 'AbortError' || err.message?.includes('timed out') ? 408 : 'error');
+
+      recordModelFailure(model, status);
 
       const rawMsg = err.message || String(err);
       const sanitizedMsg = rawMsg
@@ -419,6 +588,83 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       if (next) {
         logger.ai.info(`switching model=${next.model}`);
       }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // HISTORY RECOVERY ATTEMPT
+  // If all models in the normal chain failed and history was present,
+  // history might be corrupt/policy-poisoned. Try 1 attempt without history!
+  // -------------------------------------------------------------
+  const remainingTotalMs = totalTimeoutMs - (Date.now() - overallStartTime);
+  if (cleanHistory.length > 0 && remainingTotalMs > 500) {
+    logger.ai.warn('primary chain failed');
+    logger.ai.info('retrying without history');
+
+    const recoveryCandidates = ['gemini-38', 'gemini-37', 'qwen3-flash'];
+    const recoveryModel =
+      recoveryCandidates.find((m) => isModelHealthy(m)) || recoveryCandidates[0];
+
+    const recoveryMessages = formatOpenAIHistory(
+      [], // Empty history!
+      currentPrompt,
+      config.systemPrompt,
+      config.maxHistoryMessages
+    );
+
+    const recoveryTimeout = Math.min(config.aiModelTimeoutMs || 4000, remainingTotalMs);
+    const recoveryStart = Date.now();
+    logger.ai.info(`model=${recoveryModel} start (recovery attempt)`);
+
+    try {
+      const client = getOpenAIClient();
+      const controller = new AbortController();
+      let timer: NodeJS.Timeout | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const timeoutErr: any = new Error(
+            `Recovery model ${recoveryModel} timed out after ${recoveryTimeout}ms`
+          );
+          timeoutErr.status = 408;
+          controller.abort();
+          reject(timeoutErr);
+        }, recoveryTimeout);
+        if (typeof timer.unref === 'function') timer.unref();
+      });
+
+      let completion: any;
+      try {
+        completion = await Promise.race([
+          client.chat.completions.create(
+            { model: recoveryModel, messages: recoveryMessages },
+            { signal: controller.signal, timeout: recoveryTimeout }
+          ),
+          timeoutPromise,
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      const choice = completion?.choices && completion.choices[0];
+      const content = choice?.message?.content;
+      if (content && content.trim()) {
+        const reply = content.trim();
+        const duration = Date.now() - recoveryStart;
+        logger.ai.info('history-free recovery success');
+        logger.ai.info(`model=${recoveryModel} success duration=${duration}ms`);
+        logger.ai.info('reply generated');
+
+        recordModelSuccess(recoveryModel);
+        lastTaskType = taskType;
+        lastUsedModel = recoveryModel;
+        lastAIDurationMs = Date.now() - overallStartTime;
+        lastFallbackCount = fallbackCount + 1;
+        lastAIStatus = 'success';
+        return reply;
+      }
+    } catch (err: any) {
+      logger.ai.warn('history-free recovery failed');
+      recordModelFailure(recoveryModel, err.status || err.statusCode || 500);
     }
   }
 

@@ -22,9 +22,11 @@ function maskApiKey(key: string): string {
 async function main(): Promise<void> {
   // Dynamically import application config and services after dotenv has completed loading
   const { config } = await import('../src/config');
-  const { detectTaskType, generateReply, getAIDiagnostics, getOpenAIClient } = await import(
+  const { detectTaskType, getAIDiagnostics, getOpenAIClient } = await import(
     '../src/services/aiService'
   );
+  const { generateReply } = await import('../src/services/gemini');
+
 
   const userPrompt = process.argv.slice(2).join(' ').trim() || 'Halo';
   const taskType = detectTaskType(userPrompt);

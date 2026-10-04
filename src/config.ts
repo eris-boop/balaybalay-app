@@ -109,6 +109,10 @@ export const config = {
   aiEmergencyChain: parseModelChain(optional('AI_EMERGENCY_CHAIN', DEFAULT_EMERGENCY_CHAIN)),
   aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 4000),
   aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 10000),
+  aiDirectGeminiFallback: optionalBool('AI_DIRECT_GEMINI_FALLBACK', true),
+  circuitBreakerFailures: optionalInt('CIRCUIT_BREAKER_FAILURES', 3),
+  circuitBreakerCooldownMs: optionalInt('CIRCUIT_BREAKER_COOLDOWN_MS', 30000),
+  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 12000),
 
   // Google Gemini AI (Direct SDK fallback)
   geminiApiKey: optional('GEMINI_API_KEY', ''),
@@ -119,7 +123,21 @@ export const config = {
   // Behavior
   respondInPrivate: optionalBool('RESPOND_IN_PRIVATE', true),
   maxInputChars: optionalInt('MAX_INPUT_CHARS', 8000),
-  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 10),
+  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 20),
+
+  // PostgreSQL Persistent Memory
+  databaseUrl: optional('DATABASE_URL', ''),
+  memorySummaryEnabled: optionalBool('MEMORY_SUMMARY_ENABLED', true),
+  memorySummaryAfterMessages: optionalInt('MEMORY_SUMMARY_AFTER_MESSAGES', 30),
+  memorySummaryKeepRecent: optionalInt('MEMORY_SUMMARY_KEEP_RECENT', 20),
+  memoryRetrievalEnabled: optionalBool('MEMORY_RETRIEVAL_ENABLED', true),
+  memoryRetrievalLimit: optionalInt('MEMORY_RETRIEVAL_LIMIT', 6),
+  memoryMaxContextChars: optionalInt('MEMORY_MAX_CONTEXT_CHARS', 12000),
+
+  // Profanity Filter
+  profanityFilterEnabled: optionalBool('PROFANITY_FILTER_ENABLED', true),
+  profanityFilterMode: optional('PROFANITY_FILTER_MODE', 'mask'),
+  profanityExtraWords: optional('PROFANITY_EXTRA_WORDS', ''),
 
   // Legacy VPSMurah (optional fallback)
   vpsmurahApiKey: optional('VPSMURAH_API_KEY', ''),
