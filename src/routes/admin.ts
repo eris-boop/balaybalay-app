@@ -6,7 +6,7 @@
 import { Router, Request, Response } from 'express';
 import QRCode from 'qrcode';
 import { config } from '../config';
-import { getWhatsAppStatus, getLatestQr } from '../services/whatsappClient';
+import { getWhatsAppStatus, getLatestQr, getDiagnostics } from '../services/whatsappClient';
 
 export const adminRouter = Router();
 
@@ -115,4 +115,13 @@ adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => 
   } catch (err) {
     res.status(500).json({ error: 'Failed to generate QR image' });
   }
+});
+
+/**
+ * GET /admin/status
+ * Returns sanitized diagnostics data (protected by ADMIN_TOKEN).
+ */
+adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
+  const diag = getDiagnostics();
+  res.status(200).json(diag);
 });

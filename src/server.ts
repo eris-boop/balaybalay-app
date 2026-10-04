@@ -40,7 +40,9 @@ app.get('/health', (_req, res) => {
     whatsappProvider: wsStatus.provider,
     whatsappConnected: wsStatus.connected,
     pairingRequired: wsStatus.pairingRequired,
-    uptime: process.uptime(),
+    messageHandlerReady: wsStatus.messageHandlerReady,
+    lastMessageAt: wsStatus.lastMessageAt ? new Date(wsStatus.lastMessageAt).toISOString() : null,
+    lastReplyAt: wsStatus.lastReplyAt ? new Date(wsStatus.lastReplyAt).toISOString() : null,
   });
 });
 

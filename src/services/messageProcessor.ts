@@ -1,18 +1,18 @@
 /**
  * Unified incoming message processor.
- * Used by both polling service (GET /wa-api/inbox) and webhook handler.
+ * Used by Baileys WebSocket handler and webhook fallback.
  *
  * Filters:
- * - Ignores self messages (isFromMe or sender is bot number)
+ * - Ignores self messages (isFromMe or sender is bot)
  * - Ignores non-text messages
  * - Ignores empty text
- * - Deduplicates via idempotency cache (messageId or deterministic key)
- * - In group chats: requires bot mention
- * - In private chats: requires RESPOND_IN_PRIVATE=true
+ * - Deduplicates via idempotency cache (message.key.id)
+ * - In group chats (@g.us): requires bot mention (@s.whatsapp.net or @lid)
+ * - In private chats (@s.whatsapp.net or @lid): responds directly without mention
  * - Rate limits per sender
  * - Cleans mention from prompt before calling Gemini
  * - Persists conversation history
- * - Sends reply via WhatsApp service
+ * - Sends reply via WhatsApp service to exact remoteJid
  */
 
 import { IncomingMessage } from '../types/whatsapp';
@@ -23,21 +23,13 @@ import { memory } from './memory';
 import { idempotency, generateDeterministicKey } from './idempotency';
 import { rateLimiter } from './rateLimit';
 import { config } from '../config';
-import { phoneEquals } from '../utils/phone';
 import { logger } from '../utils/logger';
-import { getWhatsAppStatus } from './whatsappClient';
+import { getBotIdentifiers, recordGeminiTimestamp } from './whatsappClient';
 
 export async function processIncomingMessage(message: IncomingMessage): Promise<boolean> {
-  const botIdentifier = getWhatsAppStatus().botJid || config.botWhatsappNumber;
-
   // Guard 1: ignore messages sent by the bot itself
   if (message.isFromMe) {
-    logger.whatsapp.debug('Ignoring message from self (isFromMe=true)');
-    return false;
-  }
-
-  if (message.senderId && botIdentifier && phoneEquals(message.senderId, botIdentifier)) {
-    logger.whatsapp.debug('Ignoring message from bot WhatsApp number');
+    logger.whatsapp.info('message ignored reason=fromMe');
     return false;
   }
 
@@ -48,33 +40,34 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
     generateDeterministicKey(message.chatId, message.senderId, message.timestamp, message.text);
 
   if (idempotency.isDuplicate(dedupeKey)) {
-    logger.whatsapp.debug(`Duplicate message ignored: ${dedupeKey}`);
+    logger.whatsapp.info('message ignored reason=duplicate');
     return false;
   }
 
   // Guard 3: message type check (only text messages supported for AI)
   if (message.messageType && message.messageType !== 'text') {
-    logger.polling.debug(`Ignoring unsupported message type: ${message.messageType}`);
+    logger.whatsapp.info('message ignored reason=unsupported message type');
     return false;
   }
 
   // Guard 4: empty message check
   if (!message.text || !message.text.trim()) {
-    logger.polling.debug('Ignoring empty text message');
+    logger.whatsapp.info('message ignored reason=empty message');
     return false;
   }
 
   // Guard 5: chat type & mention policy
   if (message.isGroup) {
     // In group chat: bot MUST be mentioned
-    if (!botIdentifier || !isBotMentioned(message, botIdentifier)) {
-      logger.whatsapp.debug('Bot not mentioned in group message, ignoring without calling Gemini');
+    const botIdentifiers = getBotIdentifiers();
+    if (!isBotMentioned(message, botIdentifiers)) {
+      logger.whatsapp.info('message ignored reason=group message without bot mention');
       return false;
     }
   } else {
-    // In private chat: check if private responses are enabled
+    // In private chat (@s.whatsapp.net OR @lid): direct response, NO MENTION REQUIRED
     if (!config.respondInPrivate) {
-      logger.whatsapp.debug('Private chat responses disabled (RESPOND_IN_PRIVATE=false), ignoring');
+      logger.whatsapp.info('message ignored reason=private responses disabled');
       return false;
     }
   }
@@ -93,8 +86,8 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
 
   // Prepare prompt: strip bot mention from group messages
   let prompt = message.text;
-  if (message.isGroup && botIdentifier) {
-    prompt = stripBotMention(prompt, botIdentifier);
+  if (message.isGroup) {
+    prompt = stripBotMention(prompt, getBotIdentifiers());
   }
 
   // Truncate to max input chars
@@ -110,6 +103,8 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
   const history = memory.getHistory(message.chatId);
 
   try {
+    recordGeminiTimestamp();
+
     // Generate AI reply via Gemini
     const reply = await generateReply({
       message: prompt,
@@ -131,11 +126,12 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
       timestamp: Date.now(),
     });
 
-    // Send reply back to WhatsApp
+    // Send reply back to EXACT remoteJid
     await sendMessage(message.chatId, reply);
     return true;
   } catch (err) {
-    logger.error.error('Gemini processing failed, handled gracefully:', (err as Error).message);
+    const errMsg = (err as Error).message;
+    logger.error.error('Gemini processing failed, handled gracefully:', errMsg);
     try {
       await sendMessage(
         message.chatId,

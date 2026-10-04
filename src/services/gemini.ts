@@ -52,7 +52,7 @@ export async function generateReply(params: GenerateReplyParams): Promise<string
   });
 
   try {
-    logger.gemini.info('Generating response');
+    logger.gemini.info('request started');
 
     const response = await genai.models.generateContent({
       model: config.geminiModel,
@@ -64,6 +64,8 @@ export async function generateReply(params: GenerateReplyParams): Promise<string
         topP: 0.9,
       },
     });
+
+    logger.gemini.info('response received');
 
     const text = response.text;
 

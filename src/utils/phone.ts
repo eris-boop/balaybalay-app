@@ -1,12 +1,13 @@
 /**
- * Phone number normalization utilities.
- * Ensures consistent comparison regardless of format variations
- * like +628xxx, 628xxx, 628xxx@s.whatsapp.net, 628xxx@c.us, etc.
+ * Phone number and WhatsApp JID normalization utilities.
+ * Supports modern WhatsApp JIDs (@s.whatsapp.net, @lid, @g.us).
  */
+
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
 
 /**
  * Extract raw digits from a WhatsApp ID / phone string.
- * Strips: leading +, trailing @s.whatsapp.net / @c.us, all non-digit chars.
+ * Strips: leading +, trailing @s.whatsapp.net / @c.us / @lid / @g.us, all non-digit chars.
  */
 export function normalizePhone(input: string): string {
   if (!input) return '';
@@ -17,7 +18,8 @@ export function normalizePhone(input: string): string {
   cleaned = cleaned
     .replace(/@s\.whatsapp\.net$/i, '')
     .replace(/@c\.us$/i, '')
-    .replace(/@g\.us$/i, '');  // group IDs
+    .replace(/@lid$/i, '')
+    .replace(/@g\.us$/i, '');
 
   // Remove leading +
   cleaned = cleaned.replace(/^\+/, '');
@@ -32,25 +34,48 @@ export function normalizePhone(input: string): string {
  * Compare two phone numbers / WhatsApp IDs for equality after normalization.
  */
 export function phoneEquals(a: string, b: string): boolean {
+  if (!a || !b) return false;
+
+  // Direct normalized JID match (supports exact @lid and @s.whatsapp.net)
+  const normA = jidNormalizedUser(a);
+  const normB = jidNormalizedUser(b);
+  if (normA && normB && normA.toLowerCase() === normB.toLowerCase()) {
+    return true;
+  }
+
   const na = normalizePhone(a);
   const nb = normalizePhone(b);
   if (!na || !nb) return false;
-  return na === nb || na.endsWith(nb) || nb.endsWith(na);
+
+  // Only compare digits if both are reasonable phone lengths (>= 8 digits)
+  if (na === nb) return true;
+  if (na.length >= 8 && nb.length >= 8) {
+    return na.endsWith(nb) || nb.endsWith(na);
+  }
+
+  return false;
 }
 
 /**
- * Check if a given chatId represents a group chat.
- * VPSMurah / Baileys typically uses @g.us suffix for groups.
+ * Check if a given chatId represents a group chat (@g.us).
  */
 export function isGroupChat(chatId: string): boolean {
+  if (!chatId) return false;
   return chatId.includes('@g.us');
+}
+
+/**
+ * Check if a given chatId represents a private chat (@s.whatsapp.net or @lid).
+ */
+export function isPrivateChat(chatId: string): boolean {
+  if (!chatId) return false;
+  return chatId.includes('@s.whatsapp.net') || chatId.includes('@lid');
 }
 
 /**
  * Format recipient destination for sending WhatsApp messages.
  * - Group chats (e.g. 120363001234567890@g.us): preserve group ID without alteration.
- * - Private chats: normalize into pure digits (e.g. 6281234567890), removing +,
- *   spaces, dashes, parentheses, @s.whatsapp.net, and @c.us.
+ * - Private chats (@lid or @s.whatsapp.net): preserve if JID, otherwise digits only.
  */
 export function formatRecipient(chatId: string): string {
   if (!chatId) return '';
@@ -65,18 +90,24 @@ export function formatRecipient(chatId: string): string {
 
 /**
  * Format chatId into a valid Baileys JID.
- * Groups: ...@g.us
- * Private: ...@s.whatsapp.net
+ * Preserves EXACT JIDs for:
+ * - Group: ...@g.us
+ * - Modern Private LID: ...@lid
+ * - Standard Private: ...@s.whatsapp.net
+ * If raw phone number provided without domain, appends @s.whatsapp.net.
  */
 export function toBaileysJid(chatId: string): string {
   if (!chatId) return '';
   const trimmed = chatId.trim();
-  if (isGroupChat(trimmed)) {
-    return trimmed;
+
+  if (
+    trimmed.endsWith('@g.us') ||
+    trimmed.endsWith('@lid') ||
+    trimmed.endsWith('@s.whatsapp.net')
+  ) {
+    return jidNormalizedUser(trimmed);
   }
-  if (trimmed.endsWith('@s.whatsapp.net')) {
-    return trimmed;
-  }
+
   const digits = normalizePhone(trimmed);
   return digits ? `${digits}@s.whatsapp.net` : '';
 }
