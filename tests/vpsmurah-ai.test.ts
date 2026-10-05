@@ -60,9 +60,8 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     (config as any).aiGeneralChain = [
       'gemini-38',
       'qwen3-flash',
-      'gemini-37',
-      'gemini-36',
       'gpt-5-mini',
+      'gemini-37',
       'gpt-4o-mini',
       'mistral-small',
     ];
@@ -76,8 +75,9 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     ];
     (config as any).aiReasoningChain = [
       'gemini-38',
-      'gemini-37',
       'qwen3-plus',
+      'gpt-5-mini',
+      'gemini-37',
       'deepseek-r1',
       'kimi-k3',
       'gpt-55',
@@ -92,13 +92,13 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     (config as any).aiEmergencyChain = [
       'qwen3-flash',
       'gpt-5-mini',
-      'llama-4-scout',
+      'gpt-4o-mini',
       'mistral-small',
     ];
     (config as any).aiModelTimeoutMs = 4000;
     (config as any).aiTotalTimeoutMs = 10000;
     (config as any).chatJobTimeoutMs = 12000;
-    (config as any).aiDirectGeminiFallback = true;
+    (config as any).aiDirectGeminiFallback = false;
     geminiService.setTestGeminiDirectHandler(null);
 
     mockCreate = vi.fn();
@@ -201,11 +201,9 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
   });
 
   // 8. reasoning fallback ke qwen3-plus
-  it('8. reasoning task falls back to qwen3-plus when gemini-38 and gemini-37 fail', async () => {
+  it('8. reasoning task falls back to qwen3-plus when gemini-38 fails', async () => {
     // gemini-38 fails
     mockCreate.mockRejectedValueOnce({ status: 503, message: 'Service Unavailable' });
-    // gemini-37 fails
-    mockCreate.mockRejectedValueOnce({ status: 500, message: 'Server error' });
     // qwen3-plus succeeds
     mockCreate.mockResolvedValueOnce({
       choices: [{ message: { content: 'Probabilitas adalah 1/6 atau 16.67%.' } }],
@@ -218,15 +216,14 @@ describe('Smart Model Router & Multi-Model Failover Suite', () => {
     });
 
     expect(reply).toBe('Probabilitas adalah 1/6 atau 16.67%.');
-    expect(mockCreate).toHaveBeenCalledTimes(3);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
     expect(mockCreate.mock.calls[0][0].model).toBe('gemini-38');
-    expect(mockCreate.mock.calls[1][0].model).toBe('gemini-37');
-    expect(mockCreate.mock.calls[2][0].model).toBe('qwen3-plus');
+    expect(mockCreate.mock.calls[1][0].model).toBe('qwen3-plus');
 
     const diag = getAIDiagnostics();
     expect(diag.lastTaskType).toBe('reasoning');
     expect(diag.lastUsedModel).toBe('qwen3-plus');
-    expect(diag.lastFallbackCount).toBe(2);
+    expect(diag.lastFallbackCount).toBe(1);
   });
 
   // 9. primary success tidak mencoba model kedua

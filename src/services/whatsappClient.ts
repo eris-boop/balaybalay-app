@@ -22,7 +22,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { processIncomingMessage } from './messageProcessor';
 import { IncomingMessage } from '../types/whatsapp';
-import { isGroupChat } from '../utils/phone';
+import { isGroupChat, toBaileysJid } from '../utils/phone';
 
 const pinoLogger = pino({ level: 'silent' });
 
@@ -401,6 +401,64 @@ export async function sendBaileysMessage(
     logger.whatsapp.error('Send failed:', errorMsg);
     return { success: false, error: errorMsg };
   }
+}
+
+export type WAPresenceType = 'composing' | 'paused' | 'available' | 'unavailable' | 'recording';
+
+/**
+ * Send presence update (typing / composing / paused) to WhatsApp.
+ */
+export async function sendBaileysPresence(
+  jid: string,
+  presence: WAPresenceType
+): Promise<void> {
+  if (!socket || !isConnected) {
+    return;
+  }
+
+  try {
+    if (typeof socket.sendPresenceUpdate === 'function') {
+      await socket.sendPresenceUpdate(presence as any, jid);
+    }
+  } catch (err) {
+    // Non-blocking: presence failure should never crash the bot
+    logger.whatsapp.debug(`Presence update (${presence}) to ${jid} failed: ${(err as Error).message}`);
+  }
+}
+
+export interface PresenceController {
+  stop: () => void;
+}
+
+/**
+ * Start periodic typing / composing indicator for a chat while AI is processing.
+ * Refreshes every intervalMs (default 8000ms) until stopped.
+ * Guarantees 'paused' is sent and timer cleared upon stopping.
+ */
+export function startTypingIndicator(chatId: string, intervalMs = 8000): PresenceController {
+  const targetJid = toBaileysJid(chatId);
+  let isStopped = false;
+
+  // Send initial composing presence immediately
+  sendBaileysPresence(targetJid, 'composing').catch(() => {});
+
+  const interval = setInterval(() => {
+    if (isStopped) return;
+    sendBaileysPresence(targetJid, 'composing').catch(() => {});
+  }, intervalMs);
+
+  if (typeof interval.unref === 'function') {
+    interval.unref();
+  }
+
+  const stop = () => {
+    if (isStopped) return;
+    isStopped = true;
+    clearInterval(interval);
+    sendBaileysPresence(targetJid, 'paused').catch(() => {});
+  };
+
+  return { stop };
 }
 
 /**

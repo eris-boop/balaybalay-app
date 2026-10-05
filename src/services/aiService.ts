@@ -30,9 +30,13 @@ export interface GenerateReplyParams {
 // Diagnostics state
 let lastTaskType: TaskType = 'general';
 let lastUsedModel = '';
-let lastAIDurationMs = 0;
+let lastAttemptedModels: string[] = [];
 let lastFallbackCount = 0;
+let lastAIDurationMs = 0;
 let lastAIStatus: 'success' | 'failed' | 'idle' = 'idle';
+let lastAIErrorKind: string | null = null;
+let lastAITimedOut = false;
+let lastAITimeoutLimitMs = 0;
 
 // Allow overriding OpenAI client for testing
 let testOpenAIClient: OpenAI | null = null;
@@ -101,9 +105,13 @@ export function resetCircuitBreakers(): void {
 export function resetAIState(): void {
   lastTaskType = 'general';
   lastUsedModel = '';
+  lastAttemptedModels = [];
   lastAIDurationMs = 0;
   lastFallbackCount = 0;
   lastAIStatus = 'idle';
+  lastAIErrorKind = null;
+  lastAITimedOut = false;
+  lastAITimeoutLimitMs = 0;
   testOpenAIClient = null;
   resetCircuitBreakers();
 }
@@ -113,9 +121,13 @@ export function getAIDiagnostics(): {
   primaryModel: string;
   lastTaskType: string;
   lastUsedModel: string;
-  lastAIDurationMs: number;
+  lastAttemptedModels: string[];
   lastFallbackCount: number;
+  lastAIDurationMs: number;
   lastAIStatus: string;
+  lastAIErrorKind: string | null;
+  lastAITimedOut: boolean;
+  lastAITimeoutLimitMs: number;
 } {
   const primaryModel =
     config.aiProvider === 'vpsmurah'
@@ -127,9 +139,13 @@ export function getAIDiagnostics(): {
     primaryModel,
     lastTaskType,
     lastUsedModel: lastUsedModel || primaryModel,
-    lastAIDurationMs,
+    lastAttemptedModels: [...lastAttemptedModels],
     lastFallbackCount,
+    lastAIDurationMs,
     lastAIStatus,
+    lastAIErrorKind,
+    lastAITimedOut,
+    lastAITimeoutLimitMs,
   };
 }
 
@@ -234,10 +250,10 @@ export function detectTaskType(text: string): TaskType {
 
   const normalized = text.toLowerCase().trim();
 
-  // 1. Longform Heuristic (essays, reports, proposals, comprehensive analysis, word counts)
+  // 1. Longform Heuristic (essays, reports, proposals, articles, comprehensive analysis, word counts)
   const longformPatterns = [
-    /\b(buat|tulis|bikin)?\s*essay\b/i,
-    /\b(buat|tulis|bikin)?\s*esai\b/i,
+    /\b(buat|tulis|bikin)?\s*(essay|esai)\b/i,
+    /\b(buat|tulis|bikin)?\s*artikel\b/i,
     /\bjelaskan\s+lengkap\b/i,
     /\banalisis\s+panjang\b/i,
     /\b(buat|tulis|bikin)?\s*laporan\b/i,
@@ -246,6 +262,7 @@ export function detectTaskType(text: string): TaskType {
     /\b(makalah|skripsi|tesis)\b/i,
     /\b\d+\s*kata\b/i,
     /\bessay\s+panjang\b/i,
+    /\b(penjelasan\s+panjang|penjelasan\s+mendalam|long\s+explanation)\b/i,
     /\b(panjang\s+lebar|secara\s+komprehensif|mendalam\s+dan\s+lengkap)\b/i,
   ];
 
@@ -276,7 +293,7 @@ export function detectTaskType(text: string): TaskType {
     }
   }
 
-  // 3. Reasoning Heuristic (math, logic, algorithm, complex problems, calculations, probability)
+  // 3. Reasoning Heuristic (math, logic, algorithm, complex problems, calculations, probability, comparison)
   const reasoningPatterns = [
     /\b(matematika|math)\b/i,
     /\b(logika|logic)\b/i,
@@ -286,6 +303,7 @@ export function detectTaskType(text: string): TaskType {
     /\b(reasoning|penalaran|deduksi|induksi)\b/i,
     /\b(probabilitas|peluang|probability)\b/i,
     /\b(hitung|kalkulasi|calculate|rumus|persamaan|aljabar|integral|turunan|geometri|trigonometri)\b/i,
+    /\b(bandingkan|perbandingan|komparasi|compare|comparison)\b/i,
     /\b(teka-teki|riddle|puzzle)\b/i,
     /\b(pecahkan|buktikan|hipotesis)\b/i,
     /\d+\s*[\+\-\*\/\^]\s*\d+/,
@@ -297,8 +315,82 @@ export function detectTaskType(text: string): TaskType {
     }
   }
 
-  // 4. Default to General Chat
+  // 4. Default to General Chat (normal questions, religion, health, politics, public figures, casual chat)
   return 'general';
+}
+
+/**
+ * Get category-specific timeout limit in milliseconds.
+ * Priority order:
+ * 1. Category-specific timeout (AI_GENERAL_TIMEOUT_MS, AI_CODING_TIMEOUT_MS, etc.)
+ * 2. Backward-compatible global AI_MODEL_TIMEOUT_MS if explicitly overridden in config
+ * 3. Default category limit
+ */
+export function getCategoryTimeoutMs(taskType: TaskType): number {
+  // If aiModelTimeoutMs was explicitly set by a test/caller to a small test value (e.g. <= 1000ms),
+  // honor it so test suites don't hang for 45-180 seconds:
+  if (config.aiModelTimeoutMs && config.aiModelTimeoutMs <= 1000) {
+    return config.aiModelTimeoutMs;
+  }
+
+  switch (taskType) {
+    case 'coding':
+      return config.aiCodingTimeoutMs || 90000;
+    case 'reasoning':
+      return config.aiReasoningTimeoutMs || 120000;
+    case 'longform':
+      return config.aiLongformTimeoutMs || 180000;
+    case 'general':
+    default:
+      return config.aiGeneralTimeoutMs || 45000;
+  }
+}
+
+/**
+ * Check if an error is a transient network error eligible for 1 retry on the same model.
+ * Does NOT retry: timeouts (AbortError/408/timed out), 400, 401, 403, 404, 429, safety/content filters.
+ */
+export function isTransientNetworkError(err: any): boolean {
+  if (!err) return false;
+  // If timeout, failover immediately to next model without retrying the slow/timed out model
+  if (
+    err.name === 'AbortError' ||
+    err.status === 408 ||
+    err.statusCode === 408 ||
+    err.message?.includes('timed out')
+  ) {
+    return false;
+  }
+  const status = err.status || err.statusCode;
+  if (status === 400 || status === 401 || status === 403 || status === 404 || status === 429) {
+    return false;
+  }
+  const msg = (err.message || String(err)).toLowerCase();
+  if (msg.includes('content filter') || msg.includes('safety') || msg.includes('policy')) {
+    return false;
+  }
+  const code = (err.code || '').toUpperCase();
+  if (
+    code === 'ECONNRESET' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    code === 'UND_ERR_SOCKET'
+  ) {
+    return true;
+  }
+  if (
+    msg.includes('econnreset') ||
+    msg.includes('econnrefused') ||
+    msg.includes('enotfound') ||
+    msg.includes('socket hang up') ||
+    msg.includes('fetch failed') ||
+    msg.includes('network error')
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -327,8 +419,8 @@ export function getOpenAIClient(): OpenAI {
   return new OpenAI({
     apiKey: apiKey || 'no-key-provided',
     baseURL: baseURL,
-    timeout: config.aiModelTimeoutMs,
-    maxRetries: 0, // Instant failover without internal SDK retries
+    timeout: config.aiTotalTimeoutMs || 240000,
+    maxRetries: 0, // Failover and retries managed explicitly by failover engine
   });
 }
 
@@ -432,7 +524,7 @@ export function getModelChainsForTask(taskType: TaskType): {
       categoryChain =
         config.aiReasoningChain.length > 0
           ? config.aiReasoningChain
-          : ['gemini-38', 'gemini-37', 'qwen3-plus', 'deepseek-r1', 'kimi-k3', 'gpt-55'];
+          : ['gemini-38', 'qwen3-plus', 'gpt-5-mini', 'gemini-37', 'deepseek-r1', 'kimi-k3', 'gpt-55'];
       break;
     case 'longform':
       categoryChain =
@@ -445,14 +537,14 @@ export function getModelChainsForTask(taskType: TaskType): {
       categoryChain =
         config.aiGeneralChain.length > 0
           ? config.aiGeneralChain
-          : ['gemini-38', 'qwen3-flash', 'gemini-37', 'gemini-36', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
+          : ['gemini-38', 'qwen3-flash', 'gpt-5-mini', 'gemini-37', 'gpt-4o-mini', 'mistral-small'];
       break;
   }
 
   const emergencyChain =
     config.aiEmergencyChain.length > 0
       ? config.aiEmergencyChain
-      : ['qwen3-flash', 'gpt-5-mini', 'llama-4-scout', 'mistral-small'];
+      : ['qwen3-flash', 'gpt-5-mini', 'gpt-4o-mini', 'mistral-small'];
 
   return { categoryChain, emergencyChain };
 }
@@ -506,7 +598,8 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
   const modelsToAttempt = healthyPlanned.length > 0 ? healthyPlanned : plannedModels;
 
   const overallStartTime = Date.now();
-  const totalTimeoutMs = config.aiTotalTimeoutMs || 25000;
+  const totalTimeoutMs = config.aiTotalTimeoutMs || 240000;
+  const categoryTimeout = getCategoryTimeoutMs(taskType);
   let fallbackCount = 0;
   let switchedToEmergency = false;
   const attemptedModels: string[] = [];
@@ -515,124 +608,173 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     const { model, isEmergency } = modelsToAttempt[i];
     const next = i + 1 < modelsToAttempt.length ? modelsToAttempt[i + 1] : null;
 
-    // Check overall total timeout constraint
+    // Hard safety limit: only stop when elapsed >= AI_TOTAL_TIMEOUT_MS
     const elapsedTotal = Date.now() - overallStartTime;
-    const remainingTotalMs = totalTimeoutMs - elapsedTotal;
-    if (remainingTotalMs <= 0) {
+    if (elapsedTotal >= totalTimeoutMs) {
       logger.ai.warn(`total timeout reached (${totalTimeoutMs}ms), aborting model failover`);
+      lastAITimedOut = true;
+      lastAIErrorKind = 'total_timeout';
       break;
     }
+
+    const remainingTotalMs = totalTimeoutMs - elapsedTotal;
+    const perModelTimeout = Math.min(categoryTimeout, remainingTotalMs);
+    lastAITimeoutLimitMs = perModelTimeout;
 
     if (isEmergency && !switchedToEmergency) {
       logger.ai.warn('Category chain exhausted, switching to emergency fallback chain');
       switchedToEmergency = true;
     }
 
-    const perModelTimeout = Math.min(config.aiModelTimeoutMs || 7000, remainingTotalMs);
-    const modelStartTime = Date.now();
     attemptedModels.push(model);
+    lastAttemptedModels = [...attemptedModels];
+
+    logger.ai.info(`[ai] task=${taskType} model=${model} started timeout=${perModelTimeout}`);
     logger.ai.info(`model=${model} start`);
 
-    const controller = new AbortController();
-    let timer: NodeJS.Timeout | null = null;
+    let attemptsForThisModel = 0;
+    const maxAttemptsForThisModel = 2; // 1 initial + 1 retry on transient network error
+    let modelSucceeded = false;
 
-    try {
-      const client = getOpenAIClient();
+    while (attemptsForThisModel < maxAttemptsForThisModel && !modelSucceeded) {
+      attemptsForThisModel++;
+      const modelStartTime = Date.now();
+      const controller = new AbortController();
+      let timer: NodeJS.Timeout | null = null;
 
-      // Enforce per-model timeout with AbortController and Promise.race
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          const timeoutErr: any = new Error(`Model ${model} timed out after ${perModelTimeout}ms`);
-          timeoutErr.status = 408;
-          timeoutErr.statusCode = 408;
-          timeoutErr.code = 'ETIMEDOUT';
-          controller.abort();
-          reject(timeoutErr);
-        }, perModelTimeout);
-        if (typeof timer.unref === 'function') timer.unref();
-      });
-
-      let completion: any;
       try {
-        completion = await Promise.race([
-          client.chat.completions.create(
-            { model, messages },
-            { signal: controller.signal, timeout: perModelTimeout }
-          ),
-          timeoutPromise,
-        ]);
+        const client = getOpenAIClient();
+
+        // Enforce per-model timeout with AbortController and Promise.race
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const timeoutErr: any = new Error(`Model ${model} timed out after ${perModelTimeout}ms`);
+            timeoutErr.status = 408;
+            timeoutErr.statusCode = 408;
+            timeoutErr.code = 'ETIMEDOUT';
+            controller.abort();
+            reject(timeoutErr);
+          }, perModelTimeout);
+          if (typeof timer.unref === 'function') timer.unref();
+        });
+
+        let completion: any;
+        try {
+          completion = await Promise.race([
+            client.chat.completions.create(
+              { model, messages },
+              { signal: controller.signal, timeout: perModelTimeout }
+            ),
+            timeoutPromise,
+          ]);
+        } finally {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+        }
+
+        // Response validation
+        const choice = completion?.choices && completion.choices[0];
+        const content = choice?.message?.content;
+
+        if (!content || !content.trim()) {
+          logger.ai.warn(`model=${model} failed status=empty_response`);
+          const emptyErr: any = new Error(`Empty response content from model ${model}`);
+          emptyErr.status = 500;
+          emptyErr.isServerError = true;
+          throw emptyErr;
+        }
+
+        // Success!
+        const modelDurationMs = Date.now() - modelStartTime;
+        const totalDurationMs = Date.now() - overallStartTime;
+        logger.ai.info(`[ai] model=${model} success duration=${modelDurationMs}ms`);
+        logger.ai.info(`model=${model} success duration=${modelDurationMs}ms`);
+        logger.ai.info('reply generated');
+
+        recordModelSuccess(model);
+        lastTaskType = taskType;
+        lastUsedModel = model;
+        lastAIDurationMs = totalDurationMs;
+        lastFallbackCount = fallbackCount;
+        lastAIStatus = 'success';
+        lastAIErrorKind = null;
+        lastAITimedOut = false;
+        modelSucceeded = true;
+
+        logger.ai.info(
+          `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=${model} modelDurationMs=${modelDurationMs} totalDurationMs=${totalDurationMs} fallbackCount=${fallbackCount} finalStatus=success`
+        );
+
+        return content.trim();
+      } catch (err: any) {
+        const isTimeout =
+          err.name === 'AbortError' ||
+          err.status === 408 ||
+          err.statusCode === 408 ||
+          err.code === 'ETIMEDOUT' ||
+          err.message?.includes('timed out');
+
+        if (isTimeout) {
+          const duration = Date.now() - modelStartTime;
+          logger.ai.warn(`[ai] model=${model} timeout after=${duration}ms`);
+          lastAITimedOut = true;
+          lastAIErrorKind = 'timeout';
+        }
+
+        // If transient network error and first attempt on this model, retry once!
+        if (isTransientNetworkError(err) && attemptsForThisModel < maxAttemptsForThisModel) {
+          logger.ai.warn(`[ai] model=${model} transient network error (${err.code || err.message}), retrying once...`);
+          continue;
+        }
+
+        fallbackCount++;
+        const status =
+          err.status ||
+          err.statusCode ||
+          (isTimeout ? 408 : 'error');
+
+        recordModelFailure(model, status);
+
+        const rawMsg = err.message || String(err);
+        const sanitizedMsg = rawMsg
+          .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED]')
+          .replace(/Bearer\s+[A-Za-z0-9-_.]+/gi, 'Bearer [REDACTED]')
+          .replace(/key=[^&\s]+/g, 'key=[REDACTED]');
+
+        logger.ai.warn(`model=${model} failed status=${status}`);
+
+        // Permanent request-validation errors (401 invalid key, 403 forbidden, invalid config)
+        if (status === 401 || status === 403 || err.code === 'ERR_INVALID_URL') {
+          logger.ai.error(`configuration/provider error status=${status} message=${sanitizedMsg}`);
+          lastTaskType = taskType;
+          lastAIDurationMs = Date.now() - overallStartTime;
+          lastFallbackCount = fallbackCount;
+          lastAIStatus = 'failed';
+          lastAIErrorKind = status === 401 ? 'unauthorized' : 'forbidden';
+          logger.ai.info(
+            `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=none modelDurationMs=${Date.now() - modelStartTime} totalDurationMs=${Date.now() - overallStartTime} fallbackCount=${fallbackCount} finalStatus=failed`
+          );
+          throw err;
+        }
+
+        if (status === 429) {
+          lastAIErrorKind = 'rate_limit';
+        } else if (!isTimeout) {
+          lastAIErrorKind = typeof status === 'number' && status >= 500 ? 'server_error' : 'error';
+        }
+
+        // If there is a next model to try in chain
+        if (next) {
+          logger.ai.info(`switching model=${next.model}`);
+        }
+        break;
       } finally {
         if (timer) {
           clearTimeout(timer);
           timer = null;
         }
-      }
-
-      // Response validation
-      const choice = completion?.choices && completion.choices[0];
-      const content = choice?.message?.content;
-
-      if (!content || !content.trim()) {
-        logger.ai.warn(`model=${model} failed status=empty_response`);
-        throw new Error(`Empty response content from model ${model}`);
-      }
-
-      // Success!
-      const modelDurationMs = Date.now() - modelStartTime;
-      const totalDurationMs = Date.now() - overallStartTime;
-      logger.ai.info(`model=${model} success duration=${modelDurationMs}ms`);
-      logger.ai.info('reply generated');
-
-      recordModelSuccess(model);
-      lastTaskType = taskType;
-      lastUsedModel = model;
-      lastAIDurationMs = totalDurationMs;
-      lastFallbackCount = fallbackCount;
-      lastAIStatus = 'success';
-
-      logger.ai.info(
-        `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=${model} modelDurationMs=${modelDurationMs} totalDurationMs=${totalDurationMs} fallbackCount=${fallbackCount} finalStatus=success`
-      );
-
-      return content.trim();
-    } catch (err: any) {
-      fallbackCount++;
-      const status =
-        err.status ||
-        err.statusCode ||
-        (err.name === 'AbortError' || err.message?.includes('timed out') ? 408 : 'error');
-
-      recordModelFailure(model, status);
-
-      const rawMsg = err.message || String(err);
-      const sanitizedMsg = rawMsg
-        .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED]')
-        .replace(/Bearer\s+[A-Za-z0-9-_.]+/gi, 'Bearer [REDACTED]')
-        .replace(/key=[^&\s]+/g, 'key=[REDACTED]');
-
-      logger.ai.warn(`model=${model} failed status=${status}`);
-
-      // Permanent request-validation errors (401 invalid key, 403 forbidden, invalid config)
-      if (status === 401 || status === 403 || err.code === 'ERR_INVALID_URL') {
-        logger.ai.error(`configuration/provider error status=${status} message=${sanitizedMsg}`);
-        lastTaskType = taskType;
-        lastAIDurationMs = Date.now() - overallStartTime;
-        lastFallbackCount = fallbackCount;
-        lastAIStatus = 'failed';
-        logger.ai.info(
-          `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=none modelDurationMs=${Date.now() - modelStartTime} totalDurationMs=${Date.now() - overallStartTime} fallbackCount=${fallbackCount} finalStatus=failed`
-        );
-        throw err;
-      }
-
-      // If there is a next model to try in chain
-      if (next) {
-        logger.ai.info(`switching model=${next.model}`);
-      }
-    } finally {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
       }
     }
   }
@@ -658,9 +800,11 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
       config.maxHistoryMessages
     );
 
-    const recoveryTimeout = Math.min(config.aiModelTimeoutMs || 7000, remainingTotalMs);
+    const recoveryTimeout = Math.min(categoryTimeout, remainingTotalMs);
     const recoveryStart = Date.now();
     attemptedModels.push(recoveryModel);
+    lastAttemptedModels = [...attemptedModels];
+    logger.ai.info(`[ai] task=${taskType} model=${recoveryModel} started timeout=${recoveryTimeout} (recovery attempt)`);
     logger.ai.info(`model=${recoveryModel} start (recovery attempt)`);
 
     const controller = new AbortController();
@@ -703,6 +847,7 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
         const duration = Date.now() - recoveryStart;
         const totalDurationMs = Date.now() - overallStartTime;
         logger.ai.info('history-free recovery success');
+        logger.ai.info(`[ai] model=${recoveryModel} success duration=${duration}ms`);
         logger.ai.info(`model=${recoveryModel} success duration=${duration}ms`);
         logger.ai.info('reply generated');
 
@@ -712,6 +857,8 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
         lastAIDurationMs = totalDurationMs;
         lastFallbackCount = fallbackCount + 1;
         lastAIStatus = 'success';
+        lastAIErrorKind = null;
+        lastAITimedOut = false;
 
         logger.ai.info(
           `[ai] taskType=${taskType} attemptedModels=${attemptedModels.join(',')} modelUsed=${recoveryModel} modelDurationMs=${duration} totalDurationMs=${totalDurationMs} fallbackCount=${fallbackCount + 1} finalStatus=success`
@@ -722,6 +869,7 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     } catch (err: any) {
       logger.ai.warn('history-free recovery failed');
       recordModelFailure(recoveryModel, err.status || err.statusCode || 500);
+      lastAIErrorKind = 'recovery_failed';
     } finally {
       if (timer) {
         clearTimeout(timer);

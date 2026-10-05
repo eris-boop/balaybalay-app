@@ -252,6 +252,7 @@ describe('Production Reliability & Regression Suite', () => {
 
     (config as any).aiProvider = 'vpsmurah';
     (config as any).adminToken = 'test-token';
+    (config as any).aiDirectGeminiFallback = false;
     (config as any).aiCodingChain = [
       'qwen3-coder',
       'gemini-38',
@@ -263,9 +264,8 @@ describe('Production Reliability & Regression Suite', () => {
     (config as any).aiGeneralChain = [
       'gemini-38',
       'qwen3-flash',
-      'gemini-37',
-      'gemini-36',
       'gpt-5-mini',
+      'gemini-37',
       'gpt-4o-mini',
       'mistral-small',
     ];

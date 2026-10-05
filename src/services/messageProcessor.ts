@@ -22,10 +22,11 @@ import { isBotMentioned, stripBotMention } from './mention';
 import { generateReply, GeminiProviderError } from './gemini';
 import { sendMessage } from './whatsapp';
 import { memory } from './memory';
+import { LoadedContext } from '../database/memoryRepository';
 import { idempotency, generateDeterministicKey } from './idempotency';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { getBotIdentifiers, recordGeminiTimestamp } from './whatsappClient';
+import { getBotIdentifiers, recordGeminiTimestamp, startTypingIndicator } from './whatsappClient';
 import { chatQueue } from '../utils/queue';
 import { profanityFilter, filterProfanity } from './profanityFilter';
 import { getLastAIResult } from './aiService';
@@ -122,9 +123,24 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
   }
 
   // ──────── STEP 2: LOAD MEMORY CONTEXT ────────
-  const context = await memory.loadContext(message.chatId, prompt);
+  let context: LoadedContext;
+  try {
+    context = await memory.loadContext(message.chatId, prompt);
+  } catch (memErr) {
+    logger.memory.warn('[memory] context loading failed, continuing with in-memory context:', (memErr as Error).message);
+    context = {
+      recentHistory: memory.getHistory(message.chatId),
+      summary: null,
+      relevantOldMessages: [],
+      globalRelevantMessages: [],
+      globalSummary: null,
+    };
+  }
   const history = context.recentHistory;
   logger.ai.info(`history entries=${history.length}`);
+
+  // Start WhatsApp typing / composing presence while AI generates answer
+  const typingIndicator = startTypingIndicator(message.chatId);
 
   try {
     recordGeminiTimestamp();
@@ -154,8 +170,8 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
     }
 
     // ──────── STEP 5: SAVE ASSISTANT RESPONSE AFTER SUCCESS ────────
-    const aiMeta = getLastAIResult();
     try {
+      const aiMeta = getLastAIResult();
       await memory.saveAssistantMsg({
         chatId: message.chatId,
         isGroup: Boolean(message.isGroup),
@@ -164,24 +180,24 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
         taskType: aiMeta.taskType,
         memoryEligible: true,
       });
+
+      // Record successful turn in in-memory store for future turns in current session
+      memory.addEntry(message.chatId, {
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+      });
+      memory.addEntry(message.chatId, {
+        role: 'assistant',
+        content: filteredReply,
+        timestamp: Date.now(),
+      });
+
+      logger.memory.info('transaction committed');
     } catch (err) {
       // Non-blocking
       logger.memory.warn('[memory] assistant persistence failed (non-blocking):', (err as Error).message);
     }
-
-    // Record successful turn in in-memory store for future turns in current session
-    memory.addEntry(message.chatId, {
-      role: 'user',
-      content: prompt,
-      timestamp: Date.now(),
-    });
-    memory.addEntry(message.chatId, {
-      role: 'assistant',
-      content: filteredReply,
-      timestamp: Date.now(),
-    });
-
-    logger.memory.info('transaction committed');
 
     // ──────── STEP 6: SEND REPLY ────────
     await sendMessage(message.chatId, filteredReply);
@@ -212,5 +228,7 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       // ignore secondary send failure
     }
     return false;
+  } finally {
+    typingIndicator.stop();
   }
 }

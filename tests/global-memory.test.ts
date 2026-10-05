@@ -529,6 +529,7 @@ describe('Global Shared Memory Specification Suite', () => {
 
   // TEST G: All primary models fail -> emergency chain runs
   it('TEST G: all primary models fail -> emergency chain runs and succeeds', async () => {
+    (config as any).aiEmergencyChain = ['qwen3-flash', 'gpt-5-mini', 'llama-4-scout'];
     const attemptedModels: string[] = [];
     const mockOpenAI: any = {
       chat: {

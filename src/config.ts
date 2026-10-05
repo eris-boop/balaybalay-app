@@ -37,12 +37,14 @@ function optionalBool(key: string, fallback: boolean): boolean {
   return raw.toLowerCase() === 'true';
 }
 
-const DEFAULT_SYSTEM_PROMPT = `Kamu adalah asisten WhatsApp yang membantu, akurat, ringkas, dan natural.
-Jawab dengan bahasa yang sama dengan pengguna kecuali pengguna meminta bahasa lain.
-Jangan mengatakan bahwa kamu memiliki akses ke data atau fitur yang sebenarnya tidak tersedia.
-Gunakan formatting WhatsApp yang sederhana.
-Kamu memiliki memori lintas percakapan. Jika kamu menerima konteks dari percakapan sebelumnya, gunakan informasi tersebut dengan bijak.
-Jika informasi berasal dari percakapan sebelumnya, sebutkan bahwa itu berdasarkan percakapan sebelumnya, bukan fakta terverifikasi independen.`;
+const DEFAULT_SYSTEM_PROMPT = `Kamu adalah asisten WhatsApp AI yang cerdas, natural, akurat, dan serbaguna.
+Berikan jawaban langsung tanpa bertele-tele dan jangan selalu mengulang penutup seperti "Ada yang bisa saya bantu?".
+Gunakan bahasa Indonesia yang wajar dan komunikatif jika pengguna bertanya dalam bahasa Indonesia.
+Untuk pertanyaan sederhana dan sapaan santai, jawab secara ringkas. Untuk pertanyaan kompleks, penalaran, agama, kesehatan, dan analisis, berikan penjelasan terstruktur, jelas, dan mendalam.
+Untuk permintaan coding, berikan kode program yang fungsional, bersih, dan dapat langsung dijalankan.
+Pertahankan kesinambungan konteks percakapan.
+Gunakan format WhatsApp yang nyaman dibaca (*tebal*, _miring_, poin-poin).
+Jika terdapat konteks dari memori jangka panjang atau percakapan sebelumnya, gunakan secara kontekstual. Jangan berhalusinasi tentang memori yang tidak ada, dan bedakan klaim pengguna sebelumnya dari fakta terverifikasi independen.`;
 
 const defaultAuthDir = process.env.WHATSAPP_AUTH_DIR ||
   (process.platform === 'win32'
@@ -73,10 +75,10 @@ function parseModelChain(raw: string): string[] {
 }
 
 const DEFAULT_MODEL_CHAIN =
-  'gemini-38,gemini-37,gemini-36,gemini-35,qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
+  'gemini-38,qwen3-flash,gpt-5-mini,gemini-37,gpt-4o-mini,mistral-small';
 
 const DEFAULT_GENERAL_CHAIN =
-  'gemini-38,qwen3-flash,gpt-5-mini,gemini-37,gemini-36,gpt-4o-mini,mistral-small';
+  'gemini-38,qwen3-flash,gpt-5-mini,gemini-37,gpt-4o-mini,mistral-small';
 const DEFAULT_CODING_CHAIN =
   'qwen3-coder,gemini-38,gpt-53-codex,deepseek-coder,codestral,gpt-5-mini';
 const DEFAULT_REASONING_CHAIN =
@@ -84,7 +86,7 @@ const DEFAULT_REASONING_CHAIN =
 const DEFAULT_LONGFORM_CHAIN =
   'gemini-38,gemini-37,qwen3-max,gpt-55,llama-4-maverick';
 const DEFAULT_EMERGENCY_CHAIN =
-  'qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small,llama-4-scout';
+  'qwen3-flash,gpt-5-mini,gpt-4o-mini,mistral-small';
 
 export const config = {
   port: optionalInt('PORT', 3000),
@@ -109,12 +111,20 @@ export const config = {
   aiReasoningChain: parseModelChain(optional('AI_REASONING_CHAIN', DEFAULT_REASONING_CHAIN)),
   aiLongformChain: parseModelChain(optional('AI_LONGFORM_CHAIN', DEFAULT_LONGFORM_CHAIN)),
   aiEmergencyChain: parseModelChain(optional('AI_EMERGENCY_CHAIN', DEFAULT_EMERGENCY_CHAIN)),
-  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 8000),
-  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 30000),
+
+  // Category-specific Timeouts & Queue Deadlines
+  aiGeneralTimeoutMs: optionalInt('AI_GENERAL_TIMEOUT_MS', 45000),
+  aiCodingTimeoutMs: optionalInt('AI_CODING_TIMEOUT_MS', 90000),
+  aiReasoningTimeoutMs: optionalInt('AI_REASONING_TIMEOUT_MS', 120000),
+  aiLongformTimeoutMs: optionalInt('AI_LONGFORM_TIMEOUT_MS', 180000),
+  directGeminiTimeoutMs: optionalInt('DIRECT_GEMINI_TIMEOUT_MS', 90000),
+  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 240000),
+  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 260000),
+  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 45000), // backward compatibility
+
   aiDirectGeminiFallback: optionalBool('AI_DIRECT_GEMINI_FALLBACK', true),
   circuitBreakerFailures: optionalInt('CIRCUIT_BREAKER_FAILURES', 3),
   circuitBreakerCooldownMs: optionalInt('CIRCUIT_BREAKER_COOLDOWN_MS', 30000),
-  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 35000),
 
   // Google Gemini AI (Direct SDK fallback)
   geminiApiKey: optional('GEMINI_API_KEY', ''),

@@ -199,18 +199,41 @@ async function executeModelCall(
   contents: GeminiContent[],
   configObj: Record<string, unknown>
 ): Promise<string> {
-  const response = await genai.models.generateContent({
-    model: modelName,
-    contents,
-    config: configObj,
+  const timeoutMs = config.directGeminiTimeoutMs || 90000;
+  let timer: NodeJS.Timeout | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const err: any = new Error(`Direct Gemini call to ${modelName} timed out after ${timeoutMs}ms`);
+      err.status = 408;
+      err.code = 'ETIMEDOUT';
+      reject(err);
+    }, timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
   });
 
-  const text = response.text;
-  if (!text || !text.trim()) {
-    logger.gemini.warn('Gemini returned empty response');
-    throw new Error('Gemini returned empty response text');
+  try {
+    const response = await Promise.race([
+      genai.models.generateContent({
+        model: modelName,
+        contents,
+        config: configObj,
+      }),
+      timeoutPromise,
+    ]);
+
+    const text = response.text;
+    if (!text || !text.trim()) {
+      logger.gemini.warn('Gemini returned empty response');
+      throw new Error('Gemini returned empty response text');
+    }
+    return text.trim();
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   }
-  return text.trim();
 }
 
 let testGeminiDirectHandler: ((params: GenerateReplyParams) => Promise<string>) | null = null;
