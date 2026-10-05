@@ -760,24 +760,30 @@ describe('PostgreSQL Persistent Memory Suite', () => {
     expect(assistantMsg?.content).not.toContain('anjing');
   });
 
-  // 22. unprocessed group messages not persisted
+  // 22. unprocessed group messages not persisted when groupArchiveAllText is false
   it('22. group message without bot mention is ignored and NOT persisted to database', async () => {
-    const msg: IncomingMessage = {
-      chatId: 'unmentioned_group@g.us',
-      senderId: 'user123@s.whatsapp.net',
-      senderName: 'User',
-      text: 'Halo semua di grup tanpa bot mention',
-      timestamp: Date.now(),
-      isGroup: true,
-      isFromMe: false,
-      messageType: 'text',
-      messageId: 'group-unmentioned-1',
-      mentionedIds: [],
-    };
+    const prevArchive = config.groupArchiveAllText;
+    config.groupArchiveAllText = false;
+    try {
+      const msg: IncomingMessage = {
+        chatId: 'unmentioned_group@g.us',
+        senderId: 'user123@s.whatsapp.net',
+        senderName: 'User',
+        text: 'Halo semua di grup tanpa bot mention',
+        timestamp: Date.now(),
+        isGroup: true,
+        isFromMe: false,
+        messageType: 'text',
+        messageId: 'group-unmentioned-1',
+        mentionedIds: [],
+      };
 
-    const processed = await processIncomingMessage(msg);
-    expect(processed).toBe(false);
-    expect(mockDb.data.messages.length).toBe(0);
-    expect(mockDb.data.conversations.length).toBe(0);
+      const processed = await processIncomingMessage(msg);
+      expect(processed).toBe(false);
+      expect(mockDb.data.messages.length).toBe(0);
+      expect(mockDb.data.conversations.length).toBe(0);
+    } finally {
+      config.groupArchiveAllText = prevArchive;
+    }
   });
 });

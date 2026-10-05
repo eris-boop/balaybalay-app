@@ -25,6 +25,7 @@ import {
 } from '../database/memoryRepository';
 import { deleteConversation as dbDeleteConversation, deleteAllConversations as dbDeleteAll } from '../database/conversations';
 import { isFallbackOrErrorText } from './aiService';
+import { searchActiveFacts } from '../database/factsRepository';
 
 export interface MemoryStore {
   getHistory(chatId: string): ConversationEntry[];
@@ -151,6 +152,9 @@ class HybridMemoryStore implements MemoryStore {
     const relevantOldMessages = dbContext ? dbContext.relevantOldMessages : [];
     const globalRelevantMessages = dbContext ? dbContext.globalRelevantMessages : [];
     const globalSummary = dbContext ? dbContext.globalSummary : null;
+    const activeFacts = dbContext
+      ? dbContext.activeFacts
+      : (await searchActiveFacts(currentPrompt, config.memoryFactRetrievalLimit || 20));
 
     memoryDiagnostics.lastMemoryLoadAt = new Date().toISOString();
     memoryDiagnostics.lastMemoryChatFound = hasPool ? chatFound : (this.inMemoryStore.has(chatId) ? true : null);
@@ -161,7 +165,7 @@ class HybridMemoryStore implements MemoryStore {
     memoryDiagnostics.lastGlobalMemorySummaryUsed = Boolean(globalSummary);
 
     logger.memory.info(
-      `[memory] loaded recent=${recentHistory.length} relevant=${relevantOldMessages.length} global-relevant=${globalRelevantMessages.length} summary=${Boolean(summary)} globalSummary=${Boolean(globalSummary)}`
+      `[memory] loaded recent=${recentHistory.length} facts=${activeFacts.length} relevant=${relevantOldMessages.length} global-relevant=${globalRelevantMessages.length} summary=${Boolean(summary)} globalSummary=${Boolean(globalSummary)}`
     );
 
     return {
@@ -170,6 +174,7 @@ class HybridMemoryStore implements MemoryStore {
       relevantOldMessages,
       globalRelevantMessages,
       globalSummary,
+      activeFacts,
     };
   }
 
@@ -219,7 +224,10 @@ class HybridMemoryStore implements MemoryStore {
    * persistent PostgreSQL storage and in-memory cache.
    */
   async saveTurn(params: SaveTurnParams): Promise<void> {
-    if (isFallbackOrErrorText(params.assistantReply)) {
+    const userPrompt = params.userPrompt || params.userContent || '';
+    const assistantReply = params.assistantReply || params.assistantContent || '';
+
+    if (isFallbackOrErrorText(assistantReply)) {
       logger.memory.warn('Attempted to save fallback/error reply, skipping save');
       return;
     }
@@ -229,13 +237,13 @@ class HybridMemoryStore implements MemoryStore {
     // 1. Update in-memory cache
     this.addEntry(params.chatId, {
       role: 'user',
-      content: params.userPrompt,
+      content: userPrompt,
       timestamp: now,
     });
 
     this.addEntry(params.chatId, {
       role: 'assistant',
-      content: params.assistantReply,
+      content: assistantReply,
       timestamp: now,
     });
 

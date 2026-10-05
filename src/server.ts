@@ -16,6 +16,8 @@ import {
 import { logger } from './utils/logger';
 import { initDatabase, closeDatabase, getDbPool } from './database/db';
 import { ensureSchema } from './database/schema';
+import { replaySpool } from './services/dbSpool';
+import { startMemoryLearnerWorker, stopMemoryLearnerWorker } from './services/memoryLearner';
 
 const app = express();
 
@@ -93,6 +95,9 @@ const server = app.listen(config.port, '0.0.0.0', () => {
           const pool = getDbPool();
           if (pool) {
             await ensureSchema(pool);
+            await replaySpool().catch((err) => {
+              logger.database.warn('Initial spool replay failed:', (err as Error).message);
+            });
           }
         }
       })
@@ -100,6 +105,9 @@ const server = app.listen(config.port, '0.0.0.0', () => {
         logger.database.warn('[DATABASE] unavailable - startup init failed:', (err as Error).message);
       });
   }
+
+  // Start background memory learner worker loop
+  startMemoryLearnerWorker();
 
   // Initialize Baileys client if configured
   if (config.whatsappProvider === 'baileys') {
@@ -112,6 +120,7 @@ const server = app.listen(config.port, '0.0.0.0', () => {
 // --- Graceful shutdown ---
 function shutdown(signal: string) {
   logger.server.info(`${signal} received, shutting down gracefully...`);
+  stopMemoryLearnerWorker();
   disconnectWhatsApp();
   closeDatabase().catch((err: unknown) => {
     logger.database.error('Error closing database on shutdown:', (err as Error).message);

@@ -17,6 +17,9 @@ import { getOrCreateConversation, getConversationByChatId, ConversationRow } fro
 import { ConversationEntry } from '../types/whatsapp';
 import { config } from '../config';
 import { logger } from '../utils/logger';
+import { MemoryFact, searchActiveFacts } from './factsRepository';
+import { spoolMessage } from '../services/dbSpool';
+import { enqueueMessageForLearning } from '../services/memoryLearner';
 
 export interface LoadedContext {
   recentHistory: ConversationEntry[];
@@ -24,6 +27,8 @@ export interface LoadedContext {
   relevantOldMessages: ConversationEntry[];
   globalRelevantMessages: ConversationEntry[];
   globalSummary: string | null;
+  activeFacts: MemoryFact[];
+  quotedMessageText?: string | null;
 }
 
 export interface SaveUserMessageParams {
@@ -33,6 +38,8 @@ export interface SaveUserMessageParams {
   senderId?: string;
   content: string;
   sourceType: 'private' | 'group';
+  replyToMessageId?: string;
+  normalizedContent?: string;
 }
 
 export interface SaveAssistantMessageParams {
@@ -47,11 +54,14 @@ export interface SaveAssistantMessageParams {
 /** Legacy interface kept for backward compatibility in tests */
 export interface SaveTurnParams {
   chatId: string;
-  isGroup: boolean;
+  isGroup?: boolean;
   userMessageId?: string;
+  assistantMessageId?: string;
   senderId?: string;
-  userPrompt: string;
-  assistantReply: string;
+  userPrompt?: string;
+  assistantReply?: string;
+  userContent?: string;
+  assistantContent?: string;
   modelUsed?: string;
   taskType?: string;
 }
@@ -435,137 +445,202 @@ export function buildFactualSummary(existingSummary: string | null, newMessages:
  * Save a single user message to PostgreSQL.
  * Called BEFORE AI generation so messages persist even if AI fails.
  * Uses message_id for idempotency.
+ * Spools to disk if PostgreSQL is offline or encounters an error.
  */
 export async function saveUserMessage(params: SaveUserMessageParams): Promise<void> {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  // 1. Enqueue for background factual learning immediately
+  if (params.messageId) {
+    enqueueMessageForLearning({
+      messageId: params.messageId,
+      role: 'user',
+      content: params.content,
+      chatId: params.chatId,
+      senderId: params.senderId,
+    }).catch(() => {});
+  }
 
-    const conv = await getOrCreateConversation(
-      params.chatId,
-      params.isGroup ? 'group' : 'private',
-      client
-    );
+  // 2. Persist to PostgreSQL if available
+  if (getDbPool()) {
+    const client = await getClient().catch(() => null);
+    if (client) {
+      try {
+        await client.query('BEGIN');
 
-    // Idempotency: skip if message_id already stored
-    if (params.messageId) {
-      const existing = await client.query(
-        'SELECT id FROM messages WHERE message_id = $1 LIMIT 1;',
-        [params.messageId]
-      );
-      if (existing.rows.length > 0) {
-        logger.memory.info('[memory] duplicate user message skipped');
+        const conv = await getOrCreateConversation(
+          params.chatId,
+          params.isGroup ? 'group' : 'private',
+          client
+        );
+
+        // Idempotency: skip if message_id already stored
+        if (params.messageId) {
+          const existing = await client.query(
+            'SELECT id FROM messages WHERE message_id = $1 LIMIT 1;',
+            [params.messageId]
+          );
+          if (existing.rows.length > 0) {
+            logger.memory.info('[memory] duplicate user message skipped');
+            await client.query('COMMIT');
+            return;
+          }
+        }
+
+        const sql = `
+          INSERT INTO messages (
+            conversation_id, chat_id, message_id, sender_id, role,
+            content, normalized_content, source_type, reply_to_message_id,
+            memory_eligible, learn_status, created_at
+          )
+          VALUES ($1, $2, $3, $4, 'user', $5, $6, $7, $8, true, 'pending', CURRENT_TIMESTAMP)
+          ON CONFLICT (message_id) DO NOTHING;
+        `;
+        await client.query(sql, [
+          conv.id,
+          params.chatId,
+          params.messageId || null,
+          params.senderId || null,
+          params.content,
+          params.normalizedContent || null,
+          params.sourceType,
+          params.replyToMessageId || null,
+        ]);
+
+        if (params.messageId) {
+          await client.query(
+            `INSERT INTO memory_ingest_queue (message_id, status)
+             VALUES ($1, 'pending')
+             ON CONFLICT (message_id) DO NOTHING;`,
+            [params.messageId]
+          ).catch(() => {});
+        }
+
+        // Update last_message_at
+        await client.query(
+          `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
+          [conv.id]
+        );
+
         await client.query('COMMIT');
+        logger.memory.info('[memory] user-message persisted');
         return;
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        logger.database.warn('[memory] user-message persist failed, writing to spool:', (err as Error).message);
+      } finally {
+        client.release();
       }
     }
-
-    const sql = `
-      INSERT INTO messages (conversation_id, chat_id, message_id, sender_id, role, content, source_type, memory_eligible, created_at)
-      VALUES ($1, $2, $3, $4, 'user', $5, $6, true, CURRENT_TIMESTAMP)
-      ON CONFLICT (message_id) DO NOTHING;
-    `;
-    await client.query(sql, [
-      conv.id,
-      params.chatId,
-      params.messageId || null,
-      params.senderId || null,
-      params.content,
-      params.sourceType,
-    ]);
-
-    // Update last_message_at
-    await client.query(
-      `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
-      [conv.id]
-    );
-
-    await client.query('COMMIT');
-    logger.memory.info('[memory] user-message persisted');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    logger.database.warn('[memory] user-message persist failed:', (err as Error).message);
-    // Do not re-throw: user message persistence failure should not block AI
-  } finally {
-    client.release();
   }
+
+  // 3. Fallback: persistent disk spool if DB pool unavailable or transaction failed
+  await spoolMessage({
+    eventId: `spool_u_${Date.now()}_${Math.random()}`,
+    type: 'user_message',
+    chatId: params.chatId,
+    isGroup: params.isGroup,
+    messageId: params.messageId,
+    senderId: params.senderId,
+    content: params.content,
+    sourceType: params.sourceType,
+    replyToMessageId: params.replyToMessageId,
+    timestamp: Date.now(),
+  }).catch(() => {});
 }
 
 /**
  * Save a single assistant message to PostgreSQL.
  * Called AFTER AI generation succeeds and profanity filtering is applied.
+ * Assistant messages are saved into conversation history but marked memory_eligible=false / learn_status='skipped'
+ * so they are never promoted to factual knowledge (blocking hallucination feedback loops).
  */
 export async function saveAssistantMessage(params: SaveAssistantMessageParams): Promise<void> {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  if (getDbPool()) {
+    const client = await getClient().catch(() => null);
+    if (client) {
+      try {
+        await client.query('BEGIN');
 
-    const conv = await getOrCreateConversation(
-      params.chatId,
-      params.isGroup ? 'group' : 'private',
-      client
-    );
-
-    const memoryEligible = params.memoryEligible !== undefined ? params.memoryEligible : true;
-
-    const sql = `
-      INSERT INTO messages (conversation_id, chat_id, role, content, model_used, task_type, source_type, memory_eligible, created_at)
-      VALUES ($1, $2, 'assistant', $3, $4, $5, 'assistant', $6, CURRENT_TIMESTAMP);
-    `;
-    await client.query(sql, [
-      conv.id,
-      params.chatId,
-      params.content,
-      params.modelUsed || null,
-      params.taskType || null,
-      memoryEligible,
-    ]);
-
-    // Update last_message_at
-    await client.query(
-      `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
-      [conv.id]
-    );
-
-    // Per-conversation summary update check
-    if (config.memorySummaryEnabled) {
-      const countRes = await client.query<{ count: string }>(
-        `SELECT COUNT(*) as count FROM messages WHERE conversation_id = $1;`,
-        [conv.id]
-      );
-      const totalMessages = parseInt(countRes.rows[0].count, 10) || 0;
-
-      const summaryRecord = await getConversationSummary(conv.id, client);
-      const lastSummaryCount = summaryRecord?.messageCount || 0;
-
-      if (totalMessages - lastSummaryCount >= config.memorySummaryAfterMessages) {
-        const { entries: messagesToSummarize } = await getRecentHistory(
-          conv.id,
-          config.memorySummaryKeepRecent,
+        const conv = await getOrCreateConversation(
+          params.chatId,
+          params.isGroup ? 'group' : 'private',
           client
         );
-        const newSummary = buildFactualSummary(summaryRecord?.summary || null, messagesToSummarize);
-        await saveConversationSummary(conv.id, newSummary, totalMessages, client);
-        logger.database.info(`long-term summary updated for conversation_id=${conv.id}`);
+
+        const sql = `
+          INSERT INTO messages (
+            conversation_id, chat_id, role, content, model_used,
+            task_type, source_type, memory_eligible, learn_status, created_at
+          )
+          VALUES ($1, $2, 'assistant', $3, $4, $5, 'assistant', false, 'skipped', CURRENT_TIMESTAMP);
+        `;
+        await client.query(sql, [
+          conv.id,
+          params.chatId,
+          params.content,
+          params.modelUsed || null,
+          params.taskType || null,
+        ]);
+
+        // Update last_message_at
+        await client.query(
+          `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
+          [conv.id]
+        );
+
+        // Per-conversation summary update check
+        if (config.memorySummaryEnabled) {
+          const countRes = await client.query<{ count: string }>(
+            `SELECT COUNT(*) as count FROM messages WHERE conversation_id = $1;`,
+            [conv.id]
+          );
+          const totalMessages = parseInt(countRes.rows[0].count, 10) || 0;
+
+          const summaryRecord = await getConversationSummary(conv.id, client);
+          const lastSummaryCount = summaryRecord?.messageCount || 0;
+
+          if (totalMessages - lastSummaryCount >= config.memorySummaryAfterMessages) {
+            const { entries: messagesToSummarize } = await getRecentHistory(
+              conv.id,
+              config.memorySummaryKeepRecent,
+              client
+            );
+            const newSummary = buildFactualSummary(summaryRecord?.summary || null, messagesToSummarize);
+            await saveConversationSummary(conv.id, newSummary, totalMessages, client);
+            logger.database.info(`long-term summary updated for conversation_id=${conv.id}`);
+          }
+        }
+
+        await client.query('COMMIT');
+        logger.memory.info('[memory] assistant-response persisted');
+
+        // Global summary check (async, after commit, non-blocking)
+        if (config.globalMemoryEnabled) {
+          updateGlobalSummaryIfNeeded().catch((err) => {
+            logger.database.warn('Global summary async update failed:', (err as Error).message);
+          });
+        }
+        return;
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        logger.database.warn('[memory] assistant-message persist failed, writing to spool:', (err as Error).message);
+      } finally {
+        client.release();
       }
     }
-
-    await client.query('COMMIT');
-    logger.memory.info('[memory] assistant-response persisted');
-
-    // Global summary check (async, after commit, non-blocking)
-    if (config.globalMemoryEnabled) {
-      updateGlobalSummaryIfNeeded().catch((err) => {
-        logger.database.warn('Global summary async update failed:', (err as Error).message);
-      });
-    }
-  } catch (err) {
-    await client.query('ROLLBACK');
-    logger.database.warn('[memory] assistant-message persist failed:', (err as Error).message);
-    // Do not re-throw: assistant persistence failure should not break next messages
-  } finally {
-    client.release();
   }
+
+  // Fallback: persistent disk spool if DB pool unavailable or transaction failed
+  await spoolMessage({
+    eventId: `spool_a_${Date.now()}_${Math.random()}`,
+    type: 'assistant_message',
+    chatId: params.chatId,
+    isGroup: params.isGroup,
+    content: params.content,
+    sourceType: 'assistant',
+    modelUsed: params.modelUsed,
+    taskType: params.taskType,
+    timestamp: Date.now(),
+  }).catch(() => {});
 }
 
 /**
@@ -597,6 +672,9 @@ export async function saveSuccessfulTurn(params: SaveTurnParams): Promise<void> 
       }
     }
 
+    const userPrompt = params.userPrompt || params.userContent || '';
+    const assistantReply = params.assistantReply || params.assistantContent || '';
+
     const userInsertSql = `
       INSERT INTO messages (conversation_id, chat_id, message_id, sender_id, role, content, source_type, memory_eligible, created_at)
       VALUES ($1, $2, $3, $4, 'user', $5, $6, true, CURRENT_TIMESTAMP)
@@ -607,7 +685,7 @@ export async function saveSuccessfulTurn(params: SaveTurnParams): Promise<void> 
       params.chatId,
       params.userMessageId || null,
       params.senderId || null,
-      params.userPrompt,
+      userPrompt,
       params.isGroup ? 'group' : 'private',
     ]);
 
@@ -619,7 +697,7 @@ export async function saveSuccessfulTurn(params: SaveTurnParams): Promise<void> 
     await client.query(assistantInsertSql, [
       conv.id,
       params.chatId,
-      params.assistantReply,
+      assistantReply,
       params.modelUsed || null,
       params.taskType || null,
     ]);
@@ -711,17 +789,37 @@ export async function updateGlobalSummaryIfNeeded(): Promise<void> {
 /**
  * Load complete conversation context for AI generation.
  * Handles:
+ * - Active knowledge facts from memory_facts (FTS + phrase fallback)
  * - Recent history (per-chat)
  * - Per-chat summary
  * - Per-chat relevant old messages via FTS
  * - Global cross-chat relevant messages via FTS (if enabled)
  * - Global summary (if enabled)
- * - Token safety truncation
+ * - Priority-based token safety truncation:
+ *   1. current request & quoted message
+ *   2. current recent conversation
+ *   3. highly relevant facts
+ *   4. highly relevant global messages
+ *   5. current-chat relevant old messages
+ *   6. summaries
  */
 export async function loadConversationContext(
   chatId: string,
   currentPrompt: string
 ): Promise<LoadedContext> {
+  // Always search active facts (from DB or in-memory fallback)
+  const memQuestion = isMemoryQuestion(currentPrompt);
+  const factLimit = memQuestion
+    ? config.memoryFactRetrievalLimit * 2
+    : config.memoryFactRetrievalLimit;
+
+  let activeFacts: MemoryFact[] = [];
+  try {
+    activeFacts = await searchActiveFacts(currentPrompt, factLimit);
+  } catch (factErr) {
+    logger.database.warn('Active facts search error, continuing:', (factErr as Error).message);
+  }
+
   if (!getDbPool()) {
     return {
       recentHistory: [],
@@ -729,6 +827,7 @@ export async function loadConversationContext(
       relevantOldMessages: [],
       globalRelevantMessages: [],
       globalSummary: null,
+      activeFacts,
     };
   }
 
@@ -740,7 +839,6 @@ export async function loadConversationContext(
       let globalSummary: string | null = null;
 
       if (config.globalMemoryEnabled && config.globalMemoryCrossChat) {
-        const memQuestion = isMemoryQuestion(currentPrompt);
         const globalLimit = memQuestion
           ? config.globalMemoryRetrievalLimit * 2
           : config.globalMemoryRetrievalLimit;
@@ -752,12 +850,17 @@ export async function loadConversationContext(
         globalSummary = globalSummaryRecord?.summary || null;
       }
 
+      logger.memory.info(
+        `[memory] retrieval facts=${activeFacts.length} globalMessages=${globalRelevantMessages.length} recent=0`
+      );
+
       return {
         recentHistory: [],
         summary: null,
         relevantOldMessages: [],
         globalRelevantMessages,
         globalSummary,
+        activeFacts,
       };
     }
 
@@ -777,8 +880,6 @@ export async function loadConversationContext(
     ) {
       recentHistory.pop();
     }
-
-    logger.database.info(`history loaded count=${recentHistory.length}`);
 
     // 2. Fetch per-chat summary if enabled
     let summary: string | null = null;
@@ -803,7 +904,6 @@ export async function loadConversationContext(
     let globalSummary: string | null = null;
 
     if (config.globalMemoryEnabled && config.globalMemoryCrossChat) {
-      const memQuestion = isMemoryQuestion(currentPrompt);
       const globalLimit = memQuestion
         ? config.globalMemoryRetrievalLimit * 2
         : config.globalMemoryRetrievalLimit;
@@ -819,7 +919,13 @@ export async function loadConversationContext(
       globalSummary = globalSummaryRecord?.summary || null;
     }
 
-    // 5. Token safety truncation (MEMORY_MAX_CONTEXT_CHARS)
+    // 5. Priority-based token safety truncation (MEMORY_MAX_CONTEXT_CHARS = 30000)
+    // Priority order when trimming:
+    // Drop 1: summaries (least critical)
+    // Drop 2: per-chat relevant old messages
+    // Drop 3: global relevant messages
+    // Drop 4: lower-ranked facts
+    // Keep: current prompt and recent history
     const maxChars = config.memoryMaxContextChars;
     let totalChars =
       currentPrompt.length +
@@ -827,39 +933,39 @@ export async function loadConversationContext(
       (globalSummary ? globalSummary.length : 0) +
       recentHistory.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0) +
       relevantOldMessages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0) +
-      globalRelevantMessages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
+      globalRelevantMessages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0) +
+      activeFacts.reduce((acc, f) => acc + f.factText.length, 0);
 
-    // If context exceeds limit, progressively drop:
-    // 1. Drop global relevant messages first
-    if (totalChars > maxChars && globalRelevantMessages.length > 0) {
-      totalChars -= globalRelevantMessages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
-      globalRelevantMessages = [];
+    // Drop 1: Summaries
+    if (totalChars > maxChars && summary) {
+      totalChars -= summary.length;
+      summary = null;
     }
-
-    // 2. Drop per-chat relevant old messages
-    if (totalChars > maxChars && relevantOldMessages.length > 0) {
-      totalChars -= relevantOldMessages.reduce((acc, m) => acc + m.content.length, 0);
-      relevantOldMessages = [];
-    }
-
-    // 3. Truncate global summary
     if (totalChars > maxChars && globalSummary) {
       totalChars -= globalSummary.length;
       globalSummary = null;
     }
 
-    // 4. Truncate per-chat summary
-    if (totalChars > maxChars && summary) {
-      const excess = totalChars - maxChars;
-      if (summary.length > excess + 100) {
-        summary = summary.substring(0, summary.length - excess) + '...';
-      } else {
-        summary = null;
-      }
+    // Drop 2: Per-chat relevant old messages
+    if (totalChars > maxChars && relevantOldMessages.length > 0) {
+      totalChars -= relevantOldMessages.reduce((acc, m) => acc + m.content.length, 0);
+      relevantOldMessages = [];
+    }
+
+    // Drop 3: Global relevant messages
+    if (totalChars > maxChars && globalRelevantMessages.length > 0) {
+      totalChars -= globalRelevantMessages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
+      globalRelevantMessages = [];
+    }
+
+    // Drop 4: Trim facts if still over budget
+    while (totalChars > maxChars && activeFacts.length > 2) {
+      const removed = activeFacts.pop();
+      if (removed) totalChars -= removed.factText.length;
     }
 
     logger.memory.info(
-      `[memory] global-relevant=${globalRelevantMessages.length} current-chat=${recentHistory.length}`
+      `[memory] retrieval facts=${activeFacts.length} globalMessages=${globalRelevantMessages.length} recent=${recentHistory.length}`
     );
 
     return {
@@ -868,15 +974,17 @@ export async function loadConversationContext(
       relevantOldMessages,
       globalRelevantMessages,
       globalSummary,
+      activeFacts,
     };
   } catch (err) {
-    logger.database.warn('Failed to load conversation context from DB, using empty context:', (err as Error).message);
+    logger.database.warn('Failed to load conversation context from DB, using fallback context:', (err as Error).message);
     return {
       recentHistory: [],
       summary: null,
       relevantOldMessages: [],
       globalRelevantMessages: [],
       globalSummary: null,
+      activeFacts,
     };
   }
 }

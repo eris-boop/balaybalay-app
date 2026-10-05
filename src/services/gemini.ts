@@ -9,6 +9,7 @@ import { config } from '../config';
 import { ConversationEntry } from '../types/whatsapp';
 import { logger } from '../utils/logger';
 import { generateReplyWithFailover } from './aiService';
+import { MemoryFact } from '../database/factsRepository';
 
 const genai = new GoogleGenAI({ apiKey: config.geminiApiKey });
 
@@ -26,6 +27,8 @@ export interface GenerateReplyParams {
   relevantOldMessages?: ConversationEntry[];
   globalRelevantMessages?: ConversationEntry[];
   globalSummary?: string | null;
+  activeFacts?: MemoryFact[];
+  quotedMessage?: string | null;
 }
 
 /**
@@ -258,10 +261,13 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
   // Truncate input
   const truncatedMessage = message.substring(0, config.maxInputChars);
 
-  // Format current prompt
+  // Format current prompt (including quoted message if present)
   let currentPrompt = truncatedMessage;
+  if (params.quotedMessage && params.quotedMessage.trim()) {
+    currentPrompt = `[Pesan yang dikutip pengguna: "${params.quotedMessage.trim()}"]\n${currentPrompt}`;
+  }
   if (senderName) {
-    currentPrompt = `[${senderName}]: ${truncatedMessage}`;
+    currentPrompt = `[${senderName}]: ${currentPrompt}`;
   }
 
   // Merge relevant old messages and global memory with history if present
@@ -294,6 +300,10 @@ export async function generateGeminiDirectReply(params: GenerateReplyParams): Pr
 
   // Only pass systemInstruction if configured and non-empty
   let effectiveSystemPrompt = (config.systemPrompt || '').trim();
+  if (params.activeFacts && params.activeFacts.length > 0) {
+    const factsList = params.activeFacts.map((f) => `- ${f.factText}`).join('\n');
+    effectiveSystemPrompt += `\n\n[FAKTA PENGETAHUAN GLOBAL (DATABASE)]\n${factsList}`;
+  }
   if (params.globalSummary && params.globalSummary.trim()) {
     effectiveSystemPrompt += `\n\n[MEMORI GLOBAL JANGKA PANJANG]\n${params.globalSummary.trim()}`;
   }

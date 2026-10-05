@@ -26,6 +26,14 @@ export interface IncomingMessage {
   timestamp?: number;
   /** Original message type (text, image, audio, etc.) */
   messageType?: string;
+  /** Quoted message stanzaId (the message ID being replied to) */
+  quotedStanzaId?: string;
+  /** Quoted message sender/participant JID */
+  quotedParticipant?: string;
+  /** Text of the quoted message */
+  quotedText?: string;
+  /** Whether the quoted message was sent by the bot */
+  isQuotingBot?: boolean;
 }
 
 export interface OutgoingMessage {

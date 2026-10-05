@@ -37,14 +37,18 @@ function optionalBool(key: string, fallback: boolean): boolean {
   return raw.toLowerCase() === 'true';
 }
 
-const DEFAULT_SYSTEM_PROMPT = `Kamu adalah asisten WhatsApp AI yang cerdas, natural, akurat, dan serbaguna.
-Berikan jawaban langsung tanpa bertele-tele dan jangan selalu mengulang penutup seperti "Ada yang bisa saya bantu?".
-Gunakan bahasa Indonesia yang wajar dan komunikatif jika pengguna bertanya dalam bahasa Indonesia.
-Untuk pertanyaan sederhana dan sapaan santai, jawab secara ringkas. Untuk pertanyaan kompleks, penalaran, agama, kesehatan, dan analisis, berikan penjelasan terstruktur, jelas, dan mendalam.
-Untuk permintaan coding, berikan kode program yang fungsional, bersih, dan dapat langsung dijalankan.
-Pertahankan kesinambungan konteks percakapan.
-Gunakan format WhatsApp yang nyaman dibaca (*tebal*, _miring_, poin-poin).
-Jika terdapat konteks dari memori jangka panjang atau percakapan sebelumnya, gunakan secara kontekstual. Jangan berhalusinasi tentang memori yang tidak ada, dan bedakan klaim pengguna sebelumnya dari fakta terverifikasi independen.`;
+const DEFAULT_SYSTEM_PROMPT = `Kamu adalah BalayBalay AI, asisten WhatsApp serbaguna yang cerdas, natural, akurat, dan dapat diandalkan.
+- Berikan respon dalam bahasa Indonesia jika pengguna menggunakan bahasa Indonesia. Pahami bahasa gaul, singkatan sehari-hari, dan typo secara wajar.
+- Jawab langsung ke inti pertanyaan tanpa bertele-tele dan hindari pengulangan kalimat penutup klise seperti "Ada yang bisa saya bantu?".
+- Pertahankan kesinambungan alur percakapan serta manfaatkan konteks pesan yang dikutip (quoted message) dan riwayat sebelumnya.
+- Untuk pertanyaan sederhana atau santai, berikan jawaban yang ringkas dan padat. Untuk pertanyaan kompleks, analisis, matematika, dan penalaran, berikan penjelasan mendalam dan terstruktur.
+- Untuk permintaan pemrograman/coding, berikan kode program yang fungsional, bersih, lengkap, dan siap dijalankan.
+- Tangani pertanyaan agama edukatif secara informatif, objektif, dan proporsional.
+- Tangani pertanyaan kesehatan dan biologis secara informatif dan edukatif.
+- Bahas tokoh publik dan politik secara netral, faktual, dan berimbang.
+- Gunakan memori jangka panjang dan fakta yang tersimpan di database jika relevan. Jangan berhalusinasi tentang memori yang tidak ada.
+- Bedakan antara fakta terverifikasi dan klaim yang diucapkan pengguna dalam obrolan chat sebelumnya. Sampaikan informasi dari obrolan dengan atribusi yang tepat (misalnya: "Sebelumnya dalam percakapan sempat disebutkan bahwa..."). Jika terdapat kontradiksi atau ketidakpastian, sampaikan secara jujur.
+- Gunakan format teks WhatsApp (*tebal*, _miring_, poin-poin) agar nyaman dibaca.`;
 
 const defaultAuthDir = process.env.WHATSAPP_AUTH_DIR ||
   (process.platform === 'win32'
@@ -101,6 +105,13 @@ export const config = {
   // Bot Identity (optional when using Baileys because JID is fetched from socket user)
   botWhatsappNumber: optional('BOT_WHATSAPP_NUMBER', ''),
 
+  // Group Triggers & Archiving Policy
+  groupReplyOnMention: optionalBool('GROUP_REPLY_ON_MENTION', true),
+  groupReplyOnQuote: optionalBool('GROUP_REPLY_ON_QUOTE', true),
+  groupReplyAlways: optionalBool('GROUP_REPLY_ALWAYS', false),
+  groupArchiveAllText: optionalBool('GROUP_ARCHIVE_ALL_TEXT', true),
+  groupStoreProcessedMessages: optionalBool('GROUP_STORE_PROCESSED_MESSAGES', true),
+
   // AI Provider & Settings
   aiProvider: optional('AI_PROVIDER', 'vpsmurah').toLowerCase(),
   vpsmurahAiBaseUrl: optional('VPSMURAH_AI_BASE_URL', 'https://my.vpsmurah.co.id/api/v1'),
@@ -113,14 +124,14 @@ export const config = {
   aiEmergencyChain: parseModelChain(optional('AI_EMERGENCY_CHAIN', DEFAULT_EMERGENCY_CHAIN)),
 
   // Category-specific Timeouts & Queue Deadlines
-  aiGeneralTimeoutMs: optionalInt('AI_GENERAL_TIMEOUT_MS', 45000),
-  aiCodingTimeoutMs: optionalInt('AI_CODING_TIMEOUT_MS', 90000),
-  aiReasoningTimeoutMs: optionalInt('AI_REASONING_TIMEOUT_MS', 120000),
-  aiLongformTimeoutMs: optionalInt('AI_LONGFORM_TIMEOUT_MS', 180000),
-  directGeminiTimeoutMs: optionalInt('DIRECT_GEMINI_TIMEOUT_MS', 90000),
-  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 240000),
-  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 260000),
-  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 45000), // backward compatibility
+  aiGeneralTimeoutMs: optionalInt('AI_GENERAL_TIMEOUT_MS', 90000),
+  aiCodingTimeoutMs: optionalInt('AI_CODING_TIMEOUT_MS', 180000),
+  aiReasoningTimeoutMs: optionalInt('AI_REASONING_TIMEOUT_MS', 240000),
+  aiLongformTimeoutMs: optionalInt('AI_LONGFORM_TIMEOUT_MS', 360000),
+  directGeminiTimeoutMs: optionalInt('DIRECT_GEMINI_TIMEOUT_MS', 180000),
+  aiTotalTimeoutMs: optionalInt('AI_TOTAL_TIMEOUT_MS', 600000),
+  chatJobTimeoutMs: optionalInt('CHAT_JOB_TIMEOUT_MS', 660000),
+  aiModelTimeoutMs: optionalInt('AI_MODEL_TIMEOUT_MS', 90000), // backward compatibility
 
   aiDirectGeminiFallback: optionalBool('AI_DIRECT_GEMINI_FALLBACK', true),
   circuitBreakerFailures: optionalInt('CIRCUIT_BREAKER_FAILURES', 3),
@@ -135,28 +146,57 @@ export const config = {
   // Behavior
   respondInPrivate: optionalBool('RESPOND_IN_PRIVATE', true),
   maxInputChars: optionalInt('MAX_INPUT_CHARS', 8000),
-  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 25),
+  maxHistoryMessages: optionalInt('MAX_HISTORY_MESSAGES', 30),
 
-  // PostgreSQL Persistent Memory
+  // PostgreSQL Persistent Memory & Pool Resilience
   databaseUrl: optional('DATABASE_URL', ''),
+  dbPoolMax: optionalInt('DB_POOL_MAX', 10),
+  dbConnectionTimeoutMs: optionalInt('DB_CONNECTION_TIMEOUT_MS', 10000),
+  dbIdleTimeoutMs: optionalInt('DB_IDLE_TIMEOUT_MS', 30000),
+  dbQueryTimeoutMs: optionalInt('DB_QUERY_TIMEOUT_MS', 15000),
+
+  // Persistent DB Outage Spool
+  dbSpoolEnabled: optionalBool('DB_SPOOL_ENABLED', true),
+  dbSpoolPath: optional('DB_SPOOL_PATH', process.platform === 'win32'
+    ? path.resolve(process.cwd(), 'data/db-spool/messages.jsonl')
+    : '/app/data/db-spool/messages.jsonl'),
+
+  // Memory Summarization
   memorySummaryEnabled: optionalBool('MEMORY_SUMMARY_ENABLED', true),
   memorySummaryAfterMessages: optionalInt('MEMORY_SUMMARY_AFTER_MESSAGES', 30),
   memorySummaryKeepRecent: optionalInt('MEMORY_SUMMARY_KEEP_RECENT', 20),
-  memoryRetrievalEnabled: optionalBool('MEMORY_RETRIEVAL_ENABLED', true),
-  memoryRetrievalLimit: optionalInt('MEMORY_RETRIEVAL_LIMIT', 10),
-  memoryMaxContextChars: optionalInt('MEMORY_MAX_CONTEXT_CHARS', 22000),
 
-  // Global Memory
+  // Context Retrieval Limits
+  memoryRetrievalEnabled: optionalBool('MEMORY_RETRIEVAL_ENABLED', true),
+  memoryRetrievalLimit: optionalInt('MEMORY_RETRIEVAL_LIMIT', 12),
+  globalMemoryRetrievalLimit: optionalInt('GLOBAL_MEMORY_RETRIEVAL_LIMIT', 16),
+  memoryFactRetrievalLimit: optionalInt('MEMORY_FACT_RETRIEVAL_LIMIT', 20),
+  memoryMaxContextChars: optionalInt('MEMORY_MAX_CONTEXT_CHARS', 30000),
+
+  // Global Memory Scope
   globalMemoryEnabled: optionalBool('GLOBAL_MEMORY_ENABLED', true),
   globalMemoryCrossChat: optionalBool('GLOBAL_MEMORY_CROSS_CHAT', true),
   globalMemoryScope: optional('GLOBAL_MEMORY_SCOPE', 'shared_global'),
-  globalMemoryRetrievalLimit: optionalInt('GLOBAL_MEMORY_RETRIEVAL_LIMIT', 12),
   globalMemorySummaryAfterMessages: optionalInt('GLOBAL_MEMORY_SUMMARY_AFTER_MESSAGES', 50),
   globalMemorySummaryKeepRecent: optionalInt('GLOBAL_MEMORY_SUMMARY_KEEP_RECENT', 30),
 
-  // Group memory behavior
-  groupStoreProcessedMessages: optionalBool('GROUP_STORE_PROCESSED_MESSAGES', true),
-  groupArchiveAllText: optionalBool('GROUP_ARCHIVE_ALL_TEXT', false),
+  // Background Memory Learner
+  memoryLearnerEnabled: optionalBool('MEMORY_LEARNER_ENABLED', true),
+  memoryLearnerModel: optional('MEMORY_LEARNER_MODEL', 'gemini-38'),
+  memoryLearnerFallbackModel: optional('MEMORY_LEARNER_FALLBACK_MODEL', 'qwen3-flash'),
+  memoryLearnerIntervalMs: optionalInt('MEMORY_LEARNER_INTERVAL_MS', 5000),
+  memoryLearnerBatchSize: optionalInt('MEMORY_LEARNER_BATCH_SIZE', 10),
+  memoryLearnerMaxRetries: optionalInt('MEMORY_LEARNER_MAX_RETRIES', 5),
+  memoryLearnerConcurrency: optionalInt('MEMORY_LEARNER_CONCURRENCY', 1),
+
+  // Text Knowledge Snapshots
+  memoryTextSnapshotEnabled: optionalBool('MEMORY_TEXT_SNAPSHOT_ENABLED', true),
+  memoryTextSnapshotPath: optional('MEMORY_TEXT_SNAPSHOT_PATH', process.platform === 'win32'
+    ? path.resolve(process.cwd(), 'data/memory/knowledge_snapshot.txt')
+    : '/app/data/memory/knowledge_snapshot.txt'),
+  memoryNewInfoSnapshotPath: optional('MEMORY_NEW_INFO_SNAPSHOT_PATH', process.platform === 'win32'
+    ? path.resolve(process.cwd(), 'data/memory/new_information.txt')
+    : '/app/data/memory/new_information.txt'),
 
   // Profanity Filter
   profanityFilterEnabled: optionalBool('PROFANITY_FILTER_ENABLED', true),
@@ -174,4 +214,4 @@ export const config = {
     'https://my.vpsmurah.co.id/api/svc/v1/wa-api/inbox'
   ),
   vpsmurahWebhookSecret: process.env.VPSMURAH_WEBHOOK_SECRET || '',
-} as const;
+};

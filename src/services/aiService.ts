@@ -8,6 +8,7 @@ import OpenAI from 'openai';
 import { config, getVpsmurahAiApiKey } from '../config';
 import { ConversationEntry } from '../types/whatsapp';
 import { logger } from '../utils/logger';
+import { MemoryFact } from '../database/factsRepository';
 
 export type TaskType = 'general' | 'coding' | 'reasoning' | 'longform';
 
@@ -25,6 +26,8 @@ export interface GenerateReplyParams {
   relevantOldMessages?: ConversationEntry[];
   globalRelevantMessages?: ConversationEntry[];
   globalSummary?: string | null;
+  activeFacts?: MemoryFact[];
+  quotedMessage?: string | null;
 }
 
 // Diagnostics state
@@ -440,12 +443,20 @@ export function formatOpenAIHistory(
   summary?: string | null,
   relevantOldMessages?: ConversationEntry[],
   globalRelevantMessages?: ConversationEntry[],
-  globalSummary?: string | null
+  globalSummary?: string | null,
+  activeFacts?: MemoryFact[],
+  quotedMessage?: string | null
 ): OpenAIMessage[] {
   const messages: OpenAIMessage[] = [];
 
-  // 1. System Prompt + Global Summary + Per-Chat Summary
+  // 1. System Prompt + Global Summary + Per-Chat Summary + Active Facts
   let effectiveSystemPrompt = (systemPrompt || config.systemPrompt || '').trim();
+
+  // Active Global Facts from Database
+  if (activeFacts && activeFacts.length > 0) {
+    const factsList = activeFacts.map((f) => `- ${f.factText}`).join('\n');
+    effectiveSystemPrompt += `\n\n[FAKTA PENGETAHUAN GLOBAL (DATABASE)]\n${factsList}`;
+  }
 
   // Global long-term summary
   if (globalSummary && globalSummary.trim()) {
@@ -464,7 +475,15 @@ export function formatOpenAIHistory(
     });
   }
 
-  // 2. Global Relevant Messages (cross-chat, if any)
+  // 2. Direct Quoted Message (if user replied to a message)
+  if (quotedMessage && quotedMessage.trim()) {
+    messages.push({
+      role: 'system',
+      content: `[PESAN YANG DIKUTIP / DIBALAS PENGGUNA]\n"${quotedMessage.trim()}"`,
+    });
+  }
+
+  // 3. Global Relevant Messages (cross-chat raw, if any)
   if (globalRelevantMessages && globalRelevantMessages.length > 0) {
     const cleanGlobal = sanitizeHistory(globalRelevantMessages, config.globalMemoryRetrievalLimit);
     for (const entry of cleanGlobal) {
@@ -475,7 +494,7 @@ export function formatOpenAIHistory(
     }
   }
 
-  // 3. Per-Chat Relevant Old Messages (from Full-Text Search, if any)
+  // 4. Per-Chat Relevant Old Messages (from Full-Text Search, if any)
   if (relevantOldMessages && relevantOldMessages.length > 0) {
     const cleanRelevant = sanitizeHistory(relevantOldMessages, config.memoryRetrievalLimit);
     for (const entry of cleanRelevant) {
@@ -486,7 +505,7 @@ export function formatOpenAIHistory(
     }
   }
 
-  // 4. Previous History (Cleaned & Validated)
+  // 5. Current Chat Recent History (Cleaned & Validated)
   const cleanHistory = sanitizeHistory(history, maxPairs);
   for (const entry of cleanHistory) {
     messages.push({
@@ -495,7 +514,7 @@ export function formatOpenAIHistory(
     });
   }
 
-  // 5. Current User Message
+  // 6. Current User Message
   messages.push({
     role: 'user',
     content: currentPrompt,
@@ -577,7 +596,9 @@ export async function generateReplyWithFailover(params: GenerateReplyParams): Pr
     params.summary,
     params.relevantOldMessages,
     params.globalRelevantMessages,
-    params.globalSummary
+    params.globalSummary,
+    params.activeFacts,
+    params.quotedMessage
   );
 
   const { categoryChain, emergencyChain } = getModelChainsForTask(taskType);

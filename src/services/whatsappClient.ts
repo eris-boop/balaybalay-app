@@ -23,6 +23,7 @@ import { logger } from '../utils/logger';
 import { processIncomingMessage } from './messageProcessor';
 import { IncomingMessage } from '../types/whatsapp';
 import { isGroupChat, toBaileysJid } from '../utils/phone';
+import { recordBotSentMessage, isBotSentMessage } from './botSentMessages';
 
 const pinoLogger = pino({ level: 'silent' });
 
@@ -339,6 +340,35 @@ export function extractBaileysMessage(msg: WAMessage): IncomingMessage | null {
     mentionedIds = contextInfo.mentionedJid.map((jid: unknown) => jidNormalizedUser(String(jid)));
   }
 
+  // Quoted message extraction
+  const quotedStanzaId = contextInfo?.stanzaId || undefined;
+  const quotedParticipant = contextInfo?.participant
+    ? jidNormalizedUser(String(contextInfo.participant))
+    : undefined;
+
+  let quotedText: string | undefined = undefined;
+  if (contextInfo?.quotedMessage) {
+    const unwrappedQuoted = unwrapMessage(contextInfo.quotedMessage);
+    if (unwrappedQuoted) {
+      if (typeof unwrappedQuoted.conversation === 'string') {
+        quotedText = unwrappedQuoted.conversation;
+      } else if (unwrappedQuoted.extendedTextMessage?.text) {
+        quotedText = unwrappedQuoted.extendedTextMessage.text;
+      } else if (unwrappedQuoted.imageMessage?.caption) {
+        quotedText = unwrappedQuoted.imageMessage.caption;
+      }
+    }
+  }
+
+  // Check if quoted message is from the bot
+  const botIdentifiers = getBotIdentifiers();
+  let isQuotingBot = false;
+  if (quotedParticipant && botIdentifiers.includes(quotedParticipant)) {
+    isQuotingBot = true;
+  } else if (contextInfo?.isFromMe) {
+    isQuotingBot = true;
+  }
+
   const isGroup = isGroupChat(remoteJid);
   const senderId = isGroup
     ? jidNormalizedUser(key.participant || msg.participant || '')
@@ -358,6 +388,10 @@ export function extractBaileysMessage(msg: WAMessage): IncomingMessage | null {
     isGroup,
     isFromMe: Boolean(key.fromMe),
     mentionedIds,
+    quotedStanzaId,
+    quotedParticipant,
+    quotedText,
+    isQuotingBot,
     timestamp,
     messageType,
   };
@@ -372,6 +406,11 @@ async function handleBaileysMessage(msg: WAMessage): Promise<void> {
     return;
   }
 
+  // If quoting and not already flagged as quoting bot, check persistent bot_sent_messages table
+  if (!normalized.isQuotingBot && normalized.quotedStanzaId) {
+    normalized.isQuotingBot = await isBotSentMessage(normalized.quotedStanzaId);
+  }
+
   logger.whatsapp.info('Message received');
   await processIncomingMessage(normalized);
 }
@@ -383,7 +422,7 @@ async function handleBaileysMessage(msg: WAMessage): Promise<void> {
 export async function sendBaileysMessage(
   jid: string,
   text: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; messageId?: string }> {
   if (!socket || !isConnected) {
     logger.whatsapp.error('Cannot send message: Baileys is not connected');
     return { success: false, error: 'WhatsApp is not connected' };
@@ -391,10 +430,14 @@ export async function sendBaileysMessage(
 
   try {
     logger.whatsapp.info('sending reply');
-    await socket.sendMessage(jid, { text });
+    const sent = await socket.sendMessage(jid, { text });
+    const sentMsgId = (sent as any)?.key?.id;
+    if (sentMsgId) {
+      recordBotSentMessage(sentMsgId, jid).catch(() => {});
+    }
     logger.whatsapp.info('reply sent');
     lastReplyAt = Date.now();
-    return { success: true };
+    return { success: true, messageId: sentMsgId };
   } catch (err) {
     const errorMsg = (err as Error).message || 'Failed to send message via Baileys';
     lastError = `Send failed: ${errorMsg}`;

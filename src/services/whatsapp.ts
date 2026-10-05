@@ -13,6 +13,7 @@ import { sendBaileysMessage } from './whatsappClient';
 interface SendResult {
   success: boolean;
   error?: string;
+  messageId?: string;
 }
 
 /**

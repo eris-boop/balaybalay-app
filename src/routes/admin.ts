@@ -118,8 +118,12 @@ adminRouter.get('/qr', verifyAdminToken, async (req: Request, res: Response) => 
   }
 });
 
-import { isDatabaseConnected } from '../database/db';
+import { isDatabaseConnected, getDatabaseHealth, query, getDbPool } from '../database/db';
 import { memory, getMemoryDiagnostics } from '../services/memory';
+import { getLearnerDiagnostics } from '../services/memoryLearner';
+import { getActiveFactCount, refreshActiveFactCount } from '../database/factsRepository';
+import { getLastTextSnapshotAt } from '../services/knowledgeSnapshot';
+import { getSpoolPendingCount } from '../services/dbSpool';
 
 /**
  * GET /admin/status
@@ -128,14 +132,22 @@ import { memory, getMemoryDiagnostics } from '../services/memory';
 adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
   const diag = getDiagnostics();
   const aiDiag = getAIDiagnostics();
-  const dbConnected = isDatabaseConnected();
+  const dbHealth = getDatabaseHealth();
   const memDiag = getMemoryDiagnostics();
+  const learnerDiag = getLearnerDiagnostics();
+  const factCount = getActiveFactCount();
+  const spoolPending = getSpoolPendingCount();
+  const lastSnapshotAt = getLastTextSnapshotAt();
 
   res.status(200).json({
     ...diag,
     ...aiDiag,
-    databaseConnected: dbConnected,
-    persistentMemory: dbConnected,
+    databaseConnected: dbHealth.status === 'healthy',
+    databaseHealth: dbHealth.status,
+    dbPoolTotal: dbHealth.poolTotal,
+    dbPoolIdle: dbHealth.poolIdle,
+    dbPoolWaiting: dbHealth.poolWaiting,
+    persistentMemory: dbHealth.status === 'healthy',
     memorySummaryEnabled: config.memorySummaryEnabled,
     memoryRetrievalEnabled: config.memoryRetrievalEnabled,
     globalMemoryEnabled: config.globalMemoryEnabled,
@@ -149,6 +161,56 @@ adminRouter.get('/status', verifyAdminToken, (_req: Request, res: Response) => {
     lastMemorySummaryUsed: memDiag.lastMemorySummaryUsed,
     lastGlobalMemoryCount: memDiag.lastGlobalMemoryCount,
     lastGlobalMemorySummaryUsed: memDiag.lastGlobalMemorySummaryUsed,
+    ...learnerDiag,
+    knowledgeFactCount: factCount,
+    textSnapshotEnabled: config.memoryTextSnapshotEnabled,
+    lastTextSnapshotAt: lastSnapshotAt,
+    dbSpoolPending: spoolPending,
+  });
+});
+
+/**
+ * GET /admin/memory/stats
+ * Returns safe aggregate statistics without any private message contents (protected by ADMIN_TOKEN).
+ */
+adminRouter.get('/memory/stats', verifyAdminToken, async (_req: Request, res: Response) => {
+  let messagesTotal = 0;
+  let userMessages = 0;
+  let assistantMessages = 0;
+  let globalSummaryExists = false;
+
+  if (getDbPool()) {
+    try {
+      const totRes = await query<{ count: string }>('SELECT COUNT(*) as count FROM messages;');
+      messagesTotal = parseInt(totRes.rows[0].count, 10) || 0;
+
+      const userRes = await query<{ count: string }>("SELECT COUNT(*) as count FROM messages WHERE role = 'user';");
+      userMessages = parseInt(userRes.rows[0].count, 10) || 0;
+
+      const asstRes = await query<{ count: string }>("SELECT COUNT(*) as count FROM messages WHERE role = 'assistant';");
+      assistantMessages = parseInt(asstRes.rows[0].count, 10) || 0;
+
+      const globRes = await query<{ count: string }>('SELECT COUNT(*) as count FROM global_memory WHERE summary IS NOT NULL AND length(summary) > 0;');
+      globalSummaryExists = (parseInt(globRes.rows[0].count, 10) || 0) > 0;
+    } catch {
+      // In-memory fallback
+    }
+  }
+
+  await refreshActiveFactCount();
+  const factCount = getActiveFactCount();
+  const learnerDiag = getLearnerDiagnostics();
+  const spoolPending = getSpoolPendingCount();
+
+  res.status(200).json({
+    messagesTotal,
+    userMessages,
+    assistantMessages,
+    activeFacts: factCount,
+    pendingLearningJobs: learnerDiag.memoryLearnerPending,
+    failedLearningJobs: learnerDiag.memoryLearnerFailed,
+    globalSummaryExists,
+    dbSpoolPending: spoolPending,
   });
 });
 

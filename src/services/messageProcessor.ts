@@ -28,8 +28,9 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getBotIdentifiers, recordGeminiTimestamp, startTypingIndicator } from './whatsappClient';
 import { chatQueue } from '../utils/queue';
-import { profanityFilter, filterProfanity } from './profanityFilter';
+import { profanityFilter } from './profanityFilter';
 import { getLastAIResult } from './aiService';
+import { isBotSentMessage, recordBotSentMessage } from './botSentMessages';
 
 /**
  * Process an incoming message with per-chat serialization.
@@ -42,6 +43,19 @@ export async function processIncomingMessage(message: IncomingMessage): Promise<
 
 /**
  * Core processing logic for an incoming message.
+ *
+ * Architecture:
+ * 1. Validate incoming text message & deduplicate.
+ * 2. DATABASE-FIRST INGESTION: Persist raw user text to PostgreSQL (or spool if offline)
+ *    and enqueue into background memory learner BEFORE AI call or reply decision.
+ * 3. TRIGGER EVALUATION: Separate storage from response generation.
+ *    - Private chat: respond if respondInPrivate=true.
+ *    - Group chat: respond if mentioned, OR if replying/quoting a previous bot message,
+ *      OR if groupReplyAlways=true.
+ * 4. CONTEXT GENERATION: Build context with active facts, quoted message, recent history, summaries.
+ * 5. PATIENT AI GENERATION: Execute with category timeout & failover.
+ * 6. PERSIST ASSISTANT REPLY: Store in history (marked non-factual to prevent hallucination loops).
+ * 7. SEND REPLY: Dispatch to WhatsApp and record message ID for reply-to-bot tracking.
  */
 async function executeMessageProcessing(message: IncomingMessage): Promise<boolean> {
   // Guard 1: ignore messages sent by the bot itself
@@ -69,60 +83,80 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
   }
 
   // Guard 4: empty message check
-  if (!message.text || !message.text.trim()) {
+  const rawText = message.text ? message.text.trim() : '';
+  if (!rawText) {
     logger.whatsapp.info('message ignored reason=empty message');
     return false;
   }
 
-  // Guard 5: chat type & mention policy
+  // ──────── STEP 1: DATABASE-FIRST INGESTION BEFORE AI ────────
+  // All valid incoming text messages are stored in DB and enqueued for learning
+  // even if the bot does not reply (e.g. random group discussion archived).
+  const shouldStoreMessage = !message.isGroup || config.groupArchiveAllText;
+  if (shouldStoreMessage) {
+    try {
+      await memory.saveUserMsg({
+        chatId: message.chatId,
+        isGroup: Boolean(message.isGroup),
+        messageId: message.messageId,
+        senderId: message.senderId,
+        content: rawText,
+        sourceType: message.isGroup ? 'group' : 'private',
+        replyToMessageId: message.quotedStanzaId,
+      });
+      logger.whatsapp.info(`[ingest] message persisted source=${message.isGroup ? 'group' : 'private'}`);
+    } catch (err) {
+      logger.memory.warn('[ingest] user message persistence failed (non-blocking):', (err as Error).message);
+    }
+  }
+
+  // ──────── STEP 2: DECIDE WHETHER BOT SHOULD REPLY ────────
+  const botIdentifiers = getBotIdentifiers();
+  const isMentioned = isBotMentioned(message, botIdentifiers);
+
+  let isQuotingBot = Boolean(message.isQuotingBot);
+  if (!isQuotingBot && message.quotedStanzaId) {
+    isQuotingBot = await isBotSentMessage(message.quotedStanzaId);
+  }
+
+  let shouldReply = false;
   if (message.isGroup) {
-    // In group chat: bot MUST be mentioned
-    const botIdentifiers = getBotIdentifiers();
-    if (!isBotMentioned(message, botIdentifiers)) {
+    if (config.groupReplyAlways) {
+      shouldReply = true;
+    } else if (config.groupReplyOnMention && isMentioned) {
+      shouldReply = true;
+    } else if (config.groupReplyOnQuote && isQuotingBot) {
+      shouldReply = true;
+    }
+
+    if (!shouldReply) {
       logger.whatsapp.info('message ignored reason=group message without bot mention');
       return false;
     }
   } else {
-    // In private chat (@s.whatsapp.net OR @lid): direct response, NO MENTION REQUIRED
+    // Private chat: direct response without mention
     if (!config.respondInPrivate) {
       logger.whatsapp.info('message ignored reason=private responses disabled');
       return false;
     }
+    shouldReply = true;
   }
 
-  // Prepare prompt: strip bot mention from group messages
-  let prompt = message.text;
-  if (message.isGroup) {
-    prompt = stripBotMention(prompt, getBotIdentifiers());
+  // ──────── STEP 3: PREPARE PROMPT ────────
+  let prompt = rawText;
+  if (message.isGroup && isMentioned) {
+    prompt = stripBotMention(prompt, botIdentifiers);
   }
 
-  // Truncate to max input chars
   prompt = prompt.substring(0, config.maxInputChars);
 
-  // If prompt is empty after removing mention, send friendly greeting
   if (!prompt.trim()) {
     await sendMessage(message.chatId, 'Halo 👋 Ada yang bisa saya bantu?');
     logger.whatsapp.info('reply sent');
     return true;
   }
 
-  // ──────── STEP 1: SAVE USER MESSAGE BEFORE AI ────────
-  // User message persists to PostgreSQL immediately, even if AI later fails.
-  try {
-    await memory.saveUserMsg({
-      chatId: message.chatId,
-      isGroup: Boolean(message.isGroup),
-      messageId: message.messageId,
-      senderId: message.senderId,
-      content: prompt,
-      sourceType: message.isGroup ? 'group' : 'private',
-    });
-  } catch (err) {
-    // Non-blocking: persistence failure should not prevent AI response
-    logger.memory.warn('[memory] user message persistence failed (non-blocking):', (err as Error).message);
-  }
-
-  // ──────── STEP 2: LOAD MEMORY CONTEXT ────────
+  // ──────── STEP 4: LOAD MEMORY CONTEXT ────────
   let context: LoadedContext;
   try {
     context = await memory.loadContext(message.chatId, prompt);
@@ -134,8 +168,10 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       relevantOldMessages: [],
       globalRelevantMessages: [],
       globalSummary: null,
+      activeFacts: [],
     };
   }
+
   const history = context.recentHistory;
   logger.ai.info(`history entries=${history.length}`);
 
@@ -145,7 +181,7 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
   try {
     recordGeminiTimestamp();
 
-    // ──────── STEP 3: GENERATE AI REPLY ────────
+    // ──────── STEP 5: GENERATE AI REPLY ────────
     const reply = await generateReply({
       message: prompt,
       senderName: message.senderName,
@@ -155,9 +191,11 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       relevantOldMessages: context.relevantOldMessages,
       globalRelevantMessages: context.globalRelevantMessages,
       globalSummary: context.globalSummary,
+      activeFacts: context.activeFacts,
+      quotedMessage: message.quotedText || null,
     });
 
-    // ──────── STEP 4: PROFANITY FILTER ────────
+    // ──────── STEP 6: PROFANITY FILTER ────────
     let filteredReply = reply;
     try {
       filteredReply = profanityFilter.mask(reply);
@@ -169,7 +207,7 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       filteredReply = reply;
     }
 
-    // ──────── STEP 5: SAVE ASSISTANT RESPONSE AFTER SUCCESS ────────
+    // ──────── STEP 7: SAVE ASSISTANT RESPONSE AFTER SUCCESS ────────
     try {
       const aiMeta = getLastAIResult();
       await memory.saveAssistantMsg({
@@ -178,7 +216,7 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
         content: filteredReply,
         modelUsed: aiMeta.modelUsed,
         taskType: aiMeta.taskType,
-        memoryEligible: true,
+        memoryEligible: false, // Prevents hallucination feedback loops
       });
 
       // Record successful turn in in-memory store for future turns in current session
@@ -199,8 +237,11 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
       logger.memory.warn('[memory] assistant persistence failed (non-blocking):', (err as Error).message);
     }
 
-    // ──────── STEP 6: SEND REPLY ────────
-    await sendMessage(message.chatId, filteredReply);
+    // ──────── STEP 8: SEND REPLY ────────
+    const sendResult = await sendMessage(message.chatId, filteredReply);
+    if (sendResult.messageId) {
+      await recordBotSentMessage(sendResult.messageId, message.chatId);
+    }
     logger.whatsapp.info('reply sent');
     return true;
   } catch (err) {
@@ -222,7 +263,10 @@ async function executeMessageProcessing(message: IncomingMessage): Promise<boole
 
     // Send friendly user fallback; DO NOT save fallback error to conversation history!
     try {
-      await sendMessage(message.chatId, fallbackText);
+      const fallbackResult = await sendMessage(message.chatId, fallbackText);
+      if (fallbackResult.messageId) {
+        await recordBotSentMessage(fallbackResult.messageId, message.chatId);
+      }
       logger.whatsapp.info('reply sent');
     } catch {
       // ignore secondary send failure

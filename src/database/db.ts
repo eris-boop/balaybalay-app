@@ -11,6 +11,7 @@ import { logger } from '../utils/logger';
 
 let pool: Pool | null = null;
 let isConnected = false;
+let dbHealth: 'healthy' | 'degraded' | 'disconnected' = 'disconnected';
 
 /**
  * Initialize or get the singleton connection pool.
@@ -20,25 +21,28 @@ export function getDbPool(): Pool | null {
 
   if (!config.databaseUrl) {
     logger.database.info('DATABASE_URL not configured. Running with in-memory memory store.');
+    dbHealth = 'disconnected';
     return null;
   }
 
   try {
     pool = new Pool({
       connectionString: config.databaseUrl,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      max: config.dbPoolMax || 10,
+      idleTimeoutMillis: config.dbIdleTimeoutMs || 30000,
+      connectionTimeoutMillis: config.dbConnectionTimeoutMs || 10000,
     });
 
     pool.on('error', (err) => {
       logger.database.error('[DATABASE] unavailable - pool background error:', err.message);
       isConnected = false;
+      dbHealth = 'degraded';
     });
 
     return pool;
   } catch (err) {
     logger.database.error('[DATABASE] unavailable - failed to create pool:', (err as Error).message);
+    dbHealth = 'disconnected';
     return null;
   }
 }
@@ -49,6 +53,7 @@ export function getDbPool(): Pool | null {
 export function setTestDbPool(customPool: Pool | null): void {
   pool = customPool;
   isConnected = customPool !== null;
+  dbHealth = customPool !== null ? 'healthy' : 'disconnected';
 }
 
 /**
@@ -56,6 +61,31 @@ export function setTestDbPool(customPool: Pool | null): void {
  */
 export function isDatabaseConnected(): boolean {
   return isConnected;
+}
+
+/**
+ * Get current database health and pool metrics.
+ */
+export function getDatabaseHealth(): {
+  status: 'healthy' | 'degraded' | 'disconnected';
+  poolTotal: number;
+  poolIdle: number;
+  poolWaiting: number;
+} {
+  const p = pool as any;
+  return {
+    status: dbHealth,
+    poolTotal: p?.totalCount ?? 0,
+    poolIdle: p?.idleCount ?? 0,
+    poolWaiting: p?.waitingCount ?? 0,
+  };
+}
+
+/**
+ * Update internal database health status.
+ */
+export function setDatabaseHealthStatus(status: 'healthy' | 'degraded' | 'disconnected'): void {
+  dbHealth = status;
 }
 
 /**
@@ -67,16 +97,19 @@ export async function query<T extends QueryResultRow = any>(
 ): Promise<QueryResult<T>> {
   const activePool = getDbPool();
   if (!activePool) {
+    dbHealth = 'disconnected';
     throw new Error('Database pool not initialized or unavailable');
   }
 
   try {
     const res = await activePool.query<T>(text, params);
     isConnected = true;
+    dbHealth = 'healthy';
     return res;
   } catch (err) {
     logger.database.warn('[DATABASE] unavailable - query error:', (err as Error).message);
     isConnected = false;
+    dbHealth = 'degraded';
     throw err;
   }
 }
@@ -87,16 +120,19 @@ export async function query<T extends QueryResultRow = any>(
 export async function getClient(): Promise<PoolClient> {
   const activePool = getDbPool();
   if (!activePool) {
+    dbHealth = 'disconnected';
     throw new Error('Database pool not initialized or unavailable');
   }
 
   try {
     const client = await activePool.connect();
     isConnected = true;
+    dbHealth = 'healthy';
     return client;
   } catch (err) {
     logger.database.warn('[DATABASE] unavailable - connection error:', (err as Error).message);
     isConnected = false;
+    dbHealth = 'degraded';
     throw err;
   }
 }
